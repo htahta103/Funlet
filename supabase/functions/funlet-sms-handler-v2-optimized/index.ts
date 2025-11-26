@@ -39,8 +39,7 @@ async function sendSMS(
       .single();
     
     // Check SMS limit for the owner (person who initiated the action)
-    // TEMPORARILY DISABLED FOR TESTING
-    if (false && shouldSend && owner_phone_number) {
+    if (shouldSend && owner_phone_number) {
       const checkPhoneNumber = owner_phone_number; // Always check owner's limit
       
       try {
@@ -267,37 +266,19 @@ function checkCheckRsvpsPattern(message: string): { isMatch: boolean, eventName?
 // Check for MANAGE_EVENT patterns
 function checkManageEventPattern(message: string): { isMatch: boolean, eventName?: string } {
   const normalizedMessage = message.toLowerCase().trim();
-  const originalMessage = message.trim();
-  
-  // First check if it's "manage crew" - if so, don't match (let CHECK_CREW_MEMBERS handle it)
-  if (normalizedMessage === 'manage crew' || normalizedMessage.startsWith('manage crew ')) {
-    return { isMatch: false };
-  }
-  
-  // Check if it's "manage contact" - if so, don't match (let EDIT_CONTACT handle it)
-  if (normalizedMessage === 'manage contact') {
-    return { isMatch: false };
-  }
   
   const manageEventPatterns = [
-    /^manage\s+event\s+(.+)$/,      // "manage event [name]" - explicit event pattern
-    /^manage\s+(.+)$/,               // "manage [name]" - routes to event management (crew already excluded above)
+    /^manage\s+event\s+(.+)$/,
     /^check\s+event\s+(.+)$/,
     /^edit\s+event\s+(.+)$/,
     /^view\s+event\s+(.+)$/
   ];
   
   // Check for patterns with event names
-  for (let i = 0; i < manageEventPatterns.length; i++) {
-    const pattern = manageEventPatterns[i];
+  for (const pattern of manageEventPatterns) {
     const match = normalizedMessage.match(pattern);
     if (match) {
-      // Extract event name from original message to preserve case
-      // Use case-insensitive pattern on original message
-      const caseInsensitivePattern = new RegExp(pattern.source, 'i');
-      const originalMatch = originalMessage.match(caseInsensitivePattern);
-      const eventName = originalMatch ? originalMatch[1].trim() : match[1].trim();
-      return { isMatch: true, eventName: eventName };
+      return { isMatch: true, eventName: match[1].trim() };
     }
   }
   
@@ -345,8 +326,9 @@ async function checkCheckCrewMembersPattern(message: string, supabase?: any, use
   const normalizedMessage = message.toLowerCase().trim();
   
   const checkCrewMembersPatterns = [
-    // "Manage Crew" patterns - explicit only
+    // NEW: "Manage Crew" patterns
     /^manage\s+crew\s+(.+)$/,           // "manage crew Tennis Squad"
+    /^manage\s+(.+)$/,                  // "manage Tennis Squad" (exact crew name)
     /^manage\s+crew$/,                  // "manage crew"
     
     // NEW: Natural language variations
@@ -415,9 +397,9 @@ async function checkCheckCrewMembersPattern(message: string, supabase?: any, use
   
               // Check for exact crew name match (standalone crew name)
               // This should be a simple word/phrase that could be a crew name
-              // BUT exclude special commands like "Next", "Prev", "Done", "Create Crew", "exit", etc.
+              // BUT exclude special commands like "More", "Back", "Create Crew", "exit", etc.
               const normalizedMessageForExclusion = message.toLowerCase().trim();
-              const excludedCommands = ['next', 'n', 'prev', 'p', 'previous', 'done', 'd', 'create crew', 'exit', 'quit', 'stop', 'menu'];
+              const excludedCommands = ['more', 'back', 'create crew', 'exit', 'quit', 'stop', 'menu'];
               if (excludedCommands.includes(normalizedMessageForExclusion)) {
                 return { isMatch: false, crewName: null };
               }
@@ -1226,18 +1208,6 @@ function checkAddCrewMembersPattern(message: string): { isMatch: boolean, extrac
   return { isMatch: false, extractedMembers: null, crewName: null };
 }
 
-// Helper function to detect mixed input (some entries with phone numbers, some without)
-function hasMixedInput(message: string): boolean {
-  const parts = message.split(',').map(p => p.trim()).filter(p => p.length > 0);
-  if (parts.length < 2) return false; // Need at least 2 parts to be "mixed"
-  
-  const phonePattern = /[\+\d\(\)\-\s]{7,}/;
-  const withNumbers = parts.filter(p => phonePattern.test(p));
-  const withoutNumbers = parts.filter(p => !phonePattern.test(p));
-  
-  return withNumbers.length > 0 && withoutNumbers.length > 0;
-}
-
 // Parse member information from text with enhanced pattern matching
 // Supports formats like:
 // - "Tom 4155551234"
@@ -1245,15 +1215,8 @@ function hasMixedInput(message: string): boolean {
 // - "Tom +14155551234, Bob +4155551234"
 // - "Tom +14155551234, Tom +4155551234"
 // - "Tom 4155551234, Tom 4155551234" (duplicates)
-// - "David (707) 559-8115" (with parentheses and spaces)
 function parseMemberInfo(text: string): any[] {
   const members = [];
-  
-  // Normalize input: remove special Unicode characters like left-to-right marks (U+200E), right-to-left marks, etc.
-  // These invisible characters can interfere with pattern matching
-  const normalizedText = text
-    .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '') // Remove directional marks
-    .trim();
   
   // Enhanced regex patterns to handle various phone number formats
   // Updated to support multi-word names and formatted phone numbers
@@ -1284,7 +1247,7 @@ function parseMemberInfo(text: string): any[] {
     // Reset regex lastIndex
     pattern.lastIndex = 0;
     
-    while ((match = pattern.exec(normalizedText)) !== null) {
+    while ((match = pattern.exec(text)) !== null) {
       console.log(`parseMemberInfo: Pattern matched - Name: "${match[1]}", Match groups:`, match.slice(2));
       let phoneNumber = '';
       
@@ -1413,9 +1376,7 @@ function formatDateForDisplay(dateStr: string): string {
 function convertDayNameToDate(dayName: string): string {
   const dayMap: { [key: string]: number } = {
     'sunday': 0, 'monday': 1, 'tuesday': 2, 'wednesday': 3,
-    'thursday': 4, 'friday': 5, 'saturday': 6,
-    'sun': 0, 'mon': 1, 'tue': 2, 'wed': 3,
-    'thu': 4, 'fri': 5, 'sat': 6
+    'thursday': 4, 'friday': 5, 'saturday': 6
   };
   
   const monthMap: { [key: string]: number } = {
@@ -1453,52 +1414,6 @@ function convertDayNameToDate(dayName: string): string {
     return targetDate.toISOString().split('T')[0]; // YYYY-MM-DD format
   }
   
-  // Handle day of week + month + date: "Sat Nov 15", "Saturday November 15"
-  const dayMonthDateMatch = normalizedDay.match(/(sun|mon|tue|wed|thu|fri|sat|sunday|monday|tuesday|wednesday|thursday|friday|saturday)\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})/);
-  if (dayMonthDateMatch) {
-    const dayName = dayMonthDateMatch[1];
-    const monthName = dayMonthDateMatch[2];
-    const day = parseInt(dayMonthDateMatch[3]);
-    const month = monthMap[monthName];
-    const expectedDayOfWeek = dayMap[dayName];
-    
-    if (month !== undefined && day >= 1 && day <= 31 && expectedDayOfWeek !== undefined) {
-      const currentYear = new Date().getFullYear();
-      const now = new Date();
-      
-      // First, check if the date this year matches the day of week
-      let targetDate = new Date(currentYear, month, day);
-      let actualDayOfWeek = targetDate.getDay();
-      
-      if (actualDayOfWeek === expectedDayOfWeek) {
-        // Date this year matches the day of week - if it's in the past, reject it
-        if (targetDate < now) {
-          // Return a special marker that this is a past date (will be rejected by validation)
-          return targetDate.toISOString().split('T')[0]; // This will be caught by the validation check
-        }
-        // Date is in the future and matches day of week - use it
-        return targetDate.toISOString().split('T')[0];
-      }
-      
-      // Date this year doesn't match the day of week - adjust to correct day in same week
-      const dayDiff = expectedDayOfWeek - actualDayOfWeek;
-      targetDate.setDate(targetDate.getDate() + dayDiff);
-      
-      // If the adjusted date is in the past, try next year
-      if (targetDate < now) {
-        targetDate.setFullYear(currentYear + 1);
-        // Re-check day of week after year change
-        actualDayOfWeek = targetDate.getDay();
-        if (actualDayOfWeek !== expectedDayOfWeek) {
-          const dayDiff = expectedDayOfWeek - actualDayOfWeek;
-          targetDate.setDate(targetDate.getDate() + dayDiff);
-        }
-      }
-      
-      return targetDate.toISOString().split('T')[0]; // YYYY-MM-DD format
-    }
-  }
-  
   // Handle month abbreviations with dates: "Oct 20", "20 Oct", "October 20"
   const monthDateMatch = normalizedDay.match(/(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})/);
   if (monthDateMatch) {
@@ -1508,16 +1423,10 @@ function convertDayNameToDate(dayName: string): string {
     
     if (month !== undefined && day >= 1 && day <= 31) {
       const currentYear = new Date().getFullYear();
-      const now = new Date();
-      let targetDate = new Date(currentYear, month, day);
+      const targetDate = new Date(currentYear, month, day);
       
       // If the date has passed this year, use next year
-      if (targetDate < now) {
-        targetDate.setFullYear(currentYear + 1);
-      }
-      
-      // Final validation: ensure it's in the future (not today)
-      if (targetDate <= now) {
+      if (targetDate < new Date()) {
         targetDate.setFullYear(currentYear + 1);
       }
       
@@ -1828,61 +1737,13 @@ function formatPhoneNumberForDisplay(phone: string): string {
   // If it starts with 1, remove it
   const cleanDigits = digits.startsWith('1') && digits.length === 11 ? digits.substring(1) : digits;
   
-  // Format as XXX-XXX-XXXX (dashes only, no parentheses - parentheses added by caller)
+  // Format as (XXX) XXX-XXXX
   if (cleanDigits.length === 10) {
-    return `${cleanDigits.substring(0, 3)}-${cleanDigits.substring(3, 6)}-${cleanDigits.substring(6)}`;
+    return `(${cleanDigits.substring(0, 3)}) ${cleanDigits.substring(3, 6)}-${cleanDigits.substring(6)}`;
   }
   
   // Fallback: return original if can't format
   return phone;
-}
-
-// Helper function to format phone number for "already in crew" messages (e.g., +14155551234 -> 415-555-1234)
-function formatPhoneNumberForCrewMessage(phone: string): string {
-  // Remove all non-digits
-  const digits = phone.replace(/\D/g, '');
-  
-  // If it starts with 1, remove it
-  const cleanDigits = digits.startsWith('1') && digits.length === 11 ? digits.substring(1) : digits;
-  
-  // Format as XXX-XXX-XXXX (dashes only, no parentheses)
-  if (cleanDigits.length === 10) {
-    return `${cleanDigits.substring(0, 3)}-${cleanDigits.substring(3, 6)}-${cleanDigits.substring(6)}`;
-  }
-  
-  // Fallback: return original if can't format
-  return phone;
-}
-
-// Helper function to format event date (e.g., "2025-11-19" -> "11/19/2025")
-function formatEventDate(dateString: string): string {
-  // Input: "2025-11-19" (YYYY-MM-DD)
-  // Output: "11/19/2025" (MM/DD/YYYY)
-  const date = new Date(dateString + 'T00:00:00');
-  const month = (date.getMonth() + 1).toString().padStart(2, '0');
-  const day = date.getDate().toString().padStart(2, '0');
-  const year = date.getFullYear();
-  return `${month}/${day}/${year}`;
-}
-
-// Helper function to format event time (e.g., "17:00:00" -> "5:00pm" or "17:30:00" + "19:30:00" -> "5:30pm-7:30pm")
-function formatEventTime(timeString: string, endTimeString?: string | null): string {
-  // Input: "17:00:00" (HH:MM:SS) or "17:30:00"
-  // Output: "5:00pm" or "5:30pm-7:30pm"
-  const parseTime = (timeStr: string) => {
-    const [hours, minutes] = timeStr.split(':').map(Number);
-    const hour12 = hours % 12 || 12;
-    const ampm = hours < 12 ? 'am' : 'pm';
-    const minStr = `:${minutes.toString().padStart(2, '0')}`;
-    return `${hour12}${minStr}${ampm}`;
-  };
-  
-  const startTime = parseTime(timeString);
-  if (endTimeString) {
-    const endTime = parseTime(endTimeString);
-    return `${startTime}-${endTime}`;
-  }
-  return startTime;
 }
 
 // Helper function to get crew join link
@@ -2005,77 +1866,6 @@ async function getCrewMembersWithPagination(supabase: any, crewId: string, page:
   };
 }
 
-// Helper functions for EDIT_CONTACT
-async function searchUserContacts(supabase: any, userId: string, searchQuery: string): Promise<any[]> {
-  const { data: contacts, error } = await supabase
-    .from('contacts')
-    .select('id, first_name, last_name, phone_number')
-    .eq('user_id', userId)
-    .ilike('first_name', `%${searchQuery}%`)
-    .order('first_name', { ascending: true });
-  
-  if (error) {
-    console.error('Error searching contacts:', error);
-    return [];
-  }
-  
-  return contacts || [];
-}
-
-async function formatContactDisplay(contact: any): Promise<string> {
-  const fullName = contact.last_name 
-    ? `${contact.first_name} ${contact.last_name}` 
-    : contact.first_name;
-  const formattedPhone = formatPhoneNumberForDisplay(contact.phone_number);
-  return `${fullName} — (${formattedPhone})`;
-}
-
-async function showContactActionsMenu(supabase: any, userId: string, phone_number: string, send_sms: boolean, contactId: string, phoneNumberForState: string): Promise<string> {
-  // Get contact details
-  const { data: contact } = await supabase
-    .from('contacts')
-    .select('first_name, last_name, phone_number')
-    .eq('id', contactId)
-    .eq('user_id', userId)
-    .single();
-  
-  if (!contact) {
-    return 'Contact not found.';
-  }
-  
-  const contactDisplay = await formatContactDisplay(contact);
-  
-  let response = `${contactDisplay}\n\n`;
-  response += `Edit Contact:\n`;
-  response += `1. Edit Name\n`;
-  response += `2. Edit Phone Number\n`;
-  response += `3. Delete Contact\n`;
-  response += `4. Exit\n\n`;
-  response += `Reply with a number (1-4).`;
-  
-  // Update conversation state
-  await supabase
-    .from('conversation_state')
-    .upsert({
-      user_id: userId,
-      phone_number: phoneNumberForState,
-      waiting_for: 'edit_contact_actions_menu',
-      current_state: 'edit_contact_menu',
-      extracted_data: [{
-        action: 'EDIT_CONTACT',
-        contact_id: contactId,
-        contact_name: `${contact.first_name}${contact.last_name ? ' ' + contact.last_name : ''}`,
-        contact_phone: contact.phone_number,
-        timestamp: new Date().toISOString()
-      }]
-    }, {
-      onConflict: 'user_id'
-    });
-  
-  await sendSMS(phone_number, response, send_sms, phone_number);
-  return response;
-}
-
 // Helper function to show crew members and management menu
 async function showCrewMembersAndMenu(supabase: any, userId: string, phone_number: string, send_sms: boolean, crewId: string, crewName: string, phoneNumberForState: string): Promise<string> {
   // Validate ownership first
@@ -2167,7 +1957,7 @@ async function showEventDetailsAndMenu(supabase: any, userId: string, phone_numb
   // Get event details
   const { data: eventData, error: eventError } = await supabase
     .from('events')
-    .select('id, title, event_date, start_time, end_time, location, notes, status, creator_id')
+    .select('id, title, event_date, start_time, location, notes, status, creator_id')
     .eq('id', eventId)
     .single();
   
@@ -2197,9 +1987,19 @@ async function showEventDetailsAndMenu(supabase: any, userId: string, phone_numb
     });
   }
   
-  // Format date and time using new format functions
-  const formattedDate = formatEventDate(eventData.event_date);
-  const formattedTime = formatEventTime(eventData.start_time, eventData.end_time);
+  // Format date and time
+  const eventDate = new Date(`${eventData.event_date}T${eventData.start_time || '00:00:00'}`);
+  const formattedDate = eventDate.toLocaleDateString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric'
+  });
+  const formattedTime = eventDate.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+    timeZoneName: 'short'
+  });
   
   // Build response
   let response = `${eventData.title}\n`;
@@ -2243,20 +2043,7 @@ async function showEventDetailsAndMenu(supabase: any, userId: string, phone_numb
 // Main pattern matching function
 async function checkPatternMatches(message: string, currentState: any = null, isOnboarded: boolean = true, userCrewCount: number = 0, supabase?: any, userId?: string): Promise<{ action: string | null, extractedData: any }> {
   // Check message length first (before other checks)
-  // Exception: Allow messages > 160 chars when editing notes field, so specific validation can handle it
-  const isEditingNotes = currentState?.waiting_for === 'event_edit_field_input';
-  let editingField = null;
-  if (isEditingNotes && currentState?.extracted_data && Array.isArray(currentState.extracted_data)) {
-    // Find the field being edited from extracted_data
-    for (const item of currentState.extracted_data) {
-      if (item.field) {
-        editingField = item.field;
-        break;
-      }
-    }
-  }
-  
-  if (message.length > 160 && !(isEditingNotes && editingField === 'notes')) {
+  if (message.length > 160) {
     return { action: 'MESSAGE_TOO_LONG', extractedData: {} };
   }
   
@@ -2281,20 +2068,12 @@ async function checkPatternMatches(message: string, currentState: any = null, is
     const numericMatch = message.trim().match(/^(\d+)$/);
     if (numericMatch) {
       const menuOption = parseInt(numericMatch[1]);
-      if (menuOption >= 1 && menuOption <= 5) {
+      if (menuOption >= 1) {
         return {
           action: 'EVENT_MANAGEMENT_MENU_SELECTION',
           extractedData: { menu_option: menuOption }
         };
       }
-    }
-    // Invalid input - return INVALID_UNCLEAR_COMMAND for specific error message
-    const normalized = message.toLowerCase().trim();
-    if (normalized !== 'exit' && normalized !== 'quit' && normalized !== 'stop') {
-      return {
-        action: 'INVALID_UNCLEAR_COMMAND',
-        extractedData: {}
-      };
     }
   }
 
@@ -2309,16 +2088,13 @@ async function checkPatternMatches(message: string, currentState: any = null, is
       };
     }
     
-    // Handle "Next/N" and "Prev/P" for event pagination, and "Done/D" to return to main menu
+    // Handle "More" and "Back" for event pagination
     const normalized = message.toLowerCase().trim();
-    if (normalized === 'next' || normalized === 'n') {
+    if (normalized === 'more') {
       return { action: 'MANAGE_EVENT_MORE', extractedData: {} };
     }
-    if (normalized === 'prev' || normalized === 'p' || normalized === 'previous') {
+    if (normalized === 'back') {
       return { action: 'MANAGE_EVENT_BACK', extractedData: {} };
-    }
-    if (normalized === 'done' || normalized === 'd') {
-      return { action: 'MANAGE_EVENT_DONE', extractedData: {} };
     }
   }
 
@@ -2331,11 +2107,6 @@ async function checkPatternMatches(message: string, currentState: any = null, is
         extractedData: { field: normalized }
       };
     }
-    // Invalid input - return INVALID_EVENT_EDIT_FIELD_SELECTION for initial field selection
-    return {
-      action: 'INVALID_EVENT_EDIT_FIELD_SELECTION',
-      extractedData: { invalid_input: message.trim() }
-    };
   }
 
   // Handle field value input for editing
@@ -2401,14 +2172,6 @@ async function checkPatternMatches(message: string, currentState: any = null, is
     if (normalized === 'same') {
       return { action: 'DUPLICATE_EVENT_SAME_NAME', extractedData: {} };
     }
-    // Check for blank/empty input
-    if (message.trim().length === 0) {
-      return {
-        action: 'DUPLICATE_EVENT_NAME_INVALID_INPUT',
-        extractedData: { invalid_input: message.trim() }
-      };
-    }
-    // Any non-empty string is valid (except "same" which is handled above)
     return {
       action: 'DUPLICATE_EVENT_NAME_INPUT',
       extractedData: { name: message.trim() }
@@ -2447,14 +2210,6 @@ async function checkPatternMatches(message: string, currentState: any = null, is
     if (normalized === 'delete') {
       return { action: 'DELETE_EVENT_CONFIRMED', extractedData: {} };
     }
-    if (normalized === 'exit' || normalized === 'quit' || normalized === 'stop') {
-      return { action: 'EXIT', extractedData: {} };
-    }
-    // Invalid input - return specific action for error handling
-    return {
-      action: 'DELETE_EVENT_INVALID_INPUT',
-      extractedData: { invalid_input: message.trim() }
-    };
   }
 
   // Handle cancellation message choice
@@ -2481,120 +2236,6 @@ async function checkPatternMatches(message: string, currentState: any = null, is
   }
 
   // End of MANAGE_EVENT waiting_for handlers
-  // ======================================================================
-
-  // ======================================================================
-  // EDIT_CONTACT waiting_for handlers
-  // ======================================================================
-  
-  if (currentState?.waiting_for === 'edit_contact_search_input') {
-    const normalized = message.toLowerCase().trim();
-    if (normalized === 'exit') {
-      return { action: 'EXIT', extractedData: {} };
-    }
-    return {
-      action: 'EDIT_CONTACT_SEARCH',
-      extractedData: { search_query: message.trim() }
-    };
-  }
-
-  if (currentState?.waiting_for === 'edit_contact_selection') {
-    const numericMatch = message.trim().match(/^(\d+)$/);
-    if (numericMatch) {
-      const contactIndex = parseInt(numericMatch[1]) - 1;
-      return {
-        action: 'EDIT_CONTACT_SELECTION',
-        extractedData: { contact_index: contactIndex }
-      };
-    }
-    const normalized = message.toLowerCase().trim();
-    if (normalized === 'exit') {
-      return { action: 'EXIT', extractedData: {} };
-    }
-    // Invalid input - return INVALID_UNCLEAR_COMMAND for specific error message
-    return {
-      action: 'INVALID_UNCLEAR_COMMAND',
-      extractedData: {}
-    };
-  }
-
-  if (currentState?.waiting_for === 'edit_contact_actions_menu') {
-    const numericMatch = message.trim().match(/^(\d+)$/);
-    if (numericMatch) {
-      const menuOption = parseInt(numericMatch[1]);
-      if (menuOption >= 1 && menuOption <= 4) {
-        return {
-          action: 'EDIT_CONTACT_MENU_SELECTION',
-          extractedData: { menu_option: menuOption }
-        };
-      }
-      // Invalid menu option (not 1-4) - return specific action for EC-008
-      return {
-        action: 'EDIT_CONTACT_MENU_INVALID_SELECTION',
-        extractedData: {}
-      };
-    }
-    const normalized = message.toLowerCase().trim();
-    if (normalized === 'exit') {
-      return { action: 'EXIT', extractedData: {} };
-    }
-    // Invalid input (not numeric, not exit) - return specific action for EC-008
-    return {
-      action: 'EDIT_CONTACT_MENU_INVALID_SELECTION',
-      extractedData: {}
-    };
-  }
-
-  if (currentState?.waiting_for === 'edit_contact_name_input') {
-    const normalized = message.toLowerCase().trim();
-    if (normalized === 'exit') {
-      return { action: 'EXIT', extractedData: {} };
-    }
-    // Check for blank/empty input
-    if (!message || message.trim().length === 0) {
-      return {
-        action: 'EDIT_CONTACT_NAME_INPUT_INVALID',
-        extractedData: { error: 'blank_message' }
-      };
-    }
-    return {
-      action: 'EDIT_CONTACT_NAME_INPUT',
-      extractedData: { new_name: message.trim() }
-    };
-  }
-
-  if (currentState?.waiting_for === 'edit_contact_phone_input') {
-    const normalized = message.toLowerCase().trim();
-    if (normalized === 'exit') {
-      return { action: 'EXIT', extractedData: {} };
-    }
-    if (normalized === 'back') {
-      return { action: 'EDIT_CONTACT_BACK_TO_MENU', extractedData: {} };
-    }
-    // Extract 10-digit phone number
-    const phoneMatch = message.replace(/\D/g, '');
-    return {
-      action: 'EDIT_CONTACT_PHONE_INPUT',
-      extractedData: { new_phone: phoneMatch }
-    };
-  }
-
-  if (currentState?.waiting_for === 'edit_contact_delete_confirmation') {
-    const normalized = message.toLowerCase().trim();
-    if (normalized === 'delete') {
-      return { action: 'EDIT_CONTACT_DELETE_CONFIRMED', extractedData: {} };
-    }
-    if (normalized === 'back') {
-      return { action: 'EDIT_CONTACT_BACK_TO_MENU', extractedData: {} };
-    }
-    // Invalid input - return specific action for delete confirmation
-    return {
-      action: 'EDIT_CONTACT_DELETE_INVALID',
-      extractedData: {}
-    };
-  }
-
-  // End of EDIT_CONTACT waiting_for handlers
   // ======================================================================
 
   // Check for crew name input EARLY (before other pattern checks that might interfere)
@@ -2626,43 +2267,6 @@ async function checkPatternMatches(message: string, currentState: any = null, is
         event_name: manageEventResult.eventName || null
       }
     };
-  }
-
-  // Check EDIT_CONTACT patterns
-  // First check simple patterns that should match even with leading/trailing spaces
-  const trimmedMessage = message.trim();
-  if (/^edit contact$/i.test(trimmedMessage) || /^manage contact$/i.test(trimmedMessage)) {
-    return {
-      action: 'EDIT_CONTACT',
-      extractedData: {}
-    };
-  }
-  
-  // Then check patterns that extract names (use original message for better extraction)
-  const editContactPatterns = [
-    /^fix\s+(.+?)(?:'s)?\s+(?:number|phone|name)/i,  // "fix Tom's number", "fix Tom number"
-    /^change\s+(.+?)(?:'s)?\s+(?:number|phone|name)/i,  // "change Sarah's name", "change Tom number"
-    /^update\s+(.+?)(?:'s)?\s+contact/i,  // "update Tom's contact", "update Tom contact"
-    /^edit\s+(.+)$/i  // "edit Tom", "edit Sarah" (must be last to avoid conflicts)
-  ];
-
-  for (const pattern of editContactPatterns) {
-    const match = trimmedMessage.match(pattern);
-    if (match) {
-      // Extract name and clean up (original case preserved for better search)
-      const extractedName = match[1]?.trim();
-      // Don't treat "contact" as a name if it's the exact word after "edit"
-      if (extractedName && extractedName.toLowerCase() === 'contact') {
-        return {
-          action: 'EDIT_CONTACT',
-          extractedData: {}
-        };
-      }
-      return {
-        action: 'EDIT_CONTACT',
-        extractedData: extractedName ? { search_query: extractedName } : {}
-      };
-    }
   }
 
   // Check for invite more people specific patterns BEFORE general ADD_CREW_MEMBERS
@@ -2718,26 +2322,12 @@ async function checkPatternMatches(message: string, currentState: any = null, is
     return { action: 'PARTIAL_EVENT_DATE', extractedData: { date: parsedDate } };
   }
   if (currentState?.waiting_for === 'event_location_input') {
-    const normalizedMessage = message.toLowerCase().trim();
-    
-    // Allow skipping location with 'done' or 'skip'
-    if (normalizedMessage === 'done' || normalizedMessage === 'skip') {
-      return { action: 'PARTIAL_EVENT_LOCATION', extractedData: { location: null } };
-    }
-    
     if (!isValidLocation(message.trim())) {
       return { action: 'INVALID_LOCATION_INPUT', extractedData: {} };
     }
     return { action: 'PARTIAL_EVENT_LOCATION', extractedData: { location: message.trim() } };
   }
   if (currentState?.waiting_for === 'event_time_input') {
-    const normalizedMessage = message.toLowerCase().trim();
-    
-    // Allow skipping time with 'done' or 'skip'
-    if (normalizedMessage === 'done' || normalizedMessage === 'skip') {
-      return { action: 'PARTIAL_EVENT_TIME', extractedData: { start_time: null } };
-    }
-    
     // Parse time - support ranges like "5-7pm" or "5pm-7pm"
     const timeRangeMatch = message.match(/(\d{1,2}(?::\d{2})?(?:\s*[ap]m)?)\s*-\s*(\d{1,2}(?::\d{2})?\s*[ap]m)/i);
     if (timeRangeMatch) {
@@ -2768,27 +2358,13 @@ async function checkPatternMatches(message: string, currentState: any = null, is
       }
     }
     
-    // Parse single time - improved regex to better match formats like "7pm", "7 pm", "7:30pm"
-    // Pattern: digits (1-2) optionally followed by :MM, optionally followed by space, then am/pm
-    const timeMatch = message.match(/(\d{1,2}(?::\d{2})?)\s*(am|pm)/i);
-    if (timeMatch) {
-      const parsedTime = `${timeMatch[1]}${timeMatch[2]}`.toLowerCase();
-      if (isValidTime(parsedTime)) {
-        return { action: 'PARTIAL_EVENT_TIME', extractedData: { start_time: parsedTime } };
-      }
+    // Parse single time
+    const timeMatch = message.match(/(\d{1,2}:\d{2}|\d{1,2}[ap]m|\d{1,2}\s*[ap]m)/gi);
+    const parsedTime = timeMatch ? timeMatch[0] : message.trim();
+    if (!isValidTime(parsedTime)) {
+      return { action: 'INVALID_TIME_INPUT', extractedData: {} };
     }
-    
-    // Try alternative pattern: digits directly followed by am/pm (no space, no colon)
-    const simpleTimeMatch = message.match(/(\d{1,2})(am|pm)/i);
-    if (simpleTimeMatch) {
-      const parsedTime = `${simpleTimeMatch[1]}${simpleTimeMatch[2]}`.toLowerCase();
-      if (isValidTime(parsedTime)) {
-        return { action: 'PARTIAL_EVENT_TIME', extractedData: { start_time: parsedTime } };
-      }
-    }
-    
-    // If no match, return invalid
-    return { action: 'INVALID_TIME_INPUT', extractedData: {} };
+    return { action: 'PARTIAL_EVENT_TIME', extractedData: { start_time: parsedTime } };
   }
   if (currentState?.waiting_for === 'event_notes_input') {
     const normalizedMessage = message.toLowerCase().trim();
@@ -3327,21 +2903,7 @@ async function checkPatternMatches(message: string, currentState: any = null, is
         extractedData: {}
       };
     }
-    if (normalizedMessage === 'menu' || normalizedMessage === 'help' || normalizedMessage === 'commands') {
-      return {
-        action: 'HELP',
-        extractedData: {}
-      };
-    }
 
-    
-    // Check for mixed input (some entries with phones, some without) - reject immediately
-    if (hasMixedInput(message)) {
-      return {
-        action: 'INVALID_MEMBER_ADDING_MODE',
-        extractedData: {}
-      };
-    }
     
     // Check if input contains phone number pattern
     const phonePattern = /[\+\d\(\)\-\s]{7,}/;
@@ -3354,12 +2916,6 @@ async function checkPatternMatches(message: string, currentState: any = null, is
         return {
           action: 'ADD_CREW_MEMBERS',
           extractedData: { crew_members: extractedMembers }
-        };
-      } else {
-        // Phone pattern detected but parsing failed (invalid format) - return INVALID_MEMBER_ADDING_MODE
-        return {
-          action: 'INVALID_MEMBER_ADDING_MODE',
-          extractedData: {}
         };
       }
     } else {
@@ -3375,29 +2931,9 @@ async function checkPatternMatches(message: string, currentState: any = null, is
         };
       }
       
-      // Check for space-separated multiple names (e.g., "Tom Sarah Mike")
-      const words = message.trim().split(/\s+/);
-      if (words.length >= 2 && words.every(word => /^[a-zA-Z]+$/.test(word))) {
-        // Multiple space-separated names without phone numbers - return INVALID_MEMBER_ADDING_MODE
-        return {
-          action: 'INVALID_MEMBER_ADDING_MODE',
-          extractedData: {}
-        };
-      }
-      
-      // Check for numeric input when no list is active (e.g., user types "2" after no search results)
-      const numericMatch = message.trim().match(/^(\d+)$/);
-      if (numericMatch) {
-        // Numeric input when no active list - return INVALID_MEMBER_ADDING_MODE
-        return {
-          action: 'INVALID_MEMBER_ADDING_MODE',
-          extractedData: {}
-        };
-      }
-      
       // Single name - search for existing contact (but exclude special commands)
       const nameOnly = message.trim();
-      const specialCommands = ['create crew', 'create event', 'sync up', 'syncup', 'exit', 'quit', 'stop', 'menu', 'help', 'commands'];
+      const specialCommands = ['create crew', 'create event', 'sync up', 'syncup', 'exit', 'quit', 'stop'];
       const isSpecialCommand = specialCommands.some(cmd => normalizedMessage === cmd || normalizedMessage.startsWith(cmd + ' '));
       
       if (nameOnly && /^[a-zA-Z]+(?:\s+[a-zA-Z]+)*$/.test(nameOnly) && !isSpecialCommand) {
@@ -3448,21 +2984,7 @@ async function checkPatternMatches(message: string, currentState: any = null, is
         extractedData: {}
       };
     }
-    if (normalizedMessage === 'menu' || normalizedMessage === 'help' || normalizedMessage === 'commands') {
-      return {
-        action: 'HELP',
-        extractedData: {}
-      };
-    }
   
-    
-    // Check for mixed input (some entries with phones, some without) - reject immediately
-    if (hasMixedInput(message)) {
-      return {
-        action: 'INVALID_MEMBER_ADDING_MODE',
-        extractedData: {}
-      };
-    }
     
     // Check if input contains phone number pattern
     const phonePattern = /[\+\d\(\)\-\s]{7,}/;
@@ -3476,37 +2998,11 @@ async function checkPatternMatches(message: string, currentState: any = null, is
           action: 'ADD_CREW_MEMBERS',
           extractedData: { crew_members: extractedMembers }
         };
-      } else {
-        // Phone pattern detected but parsing failed (invalid format) - return INVALID_MEMBER_ADDING_MODE
-        return {
-          action: 'INVALID_MEMBER_ADDING_MODE',
-          extractedData: {}
-        };
       }
     } else {
-      // Check for space-separated multiple names (e.g., "Tom Sarah Mike")
-      const words = message.trim().split(/\s+/);
-      if (words.length >= 2 && words.every(word => /^[a-zA-Z]+$/.test(word))) {
-        // Multiple space-separated names without phone numbers - return INVALID_MEMBER_ADDING_MODE
-        return {
-          action: 'INVALID_MEMBER_ADDING_MODE',
-          extractedData: {}
-        };
-      }
-      
-      // Check for numeric input when no list is active (e.g., user types "2" after no search results)
-      const numericMatch = message.trim().match(/^(\d+)$/);
-      if (numericMatch) {
-        // Numeric input when no active list - return INVALID_MEMBER_ADDING_MODE
-        return {
-          action: 'INVALID_MEMBER_ADDING_MODE',
-          extractedData: {}
-        };
-      }
-      
       // Name only - search for existing contact (but exclude special commands)
       const nameOnly = message.trim();
-      const specialCommands = ['create crew', 'create event', 'sync up', 'syncup', 'exit', 'quit', 'stop', 'menu', 'help', 'commands'];
+      const specialCommands = ['create crew', 'create event', 'sync up', 'syncup', 'exit', 'quit', 'stop'];
       const isSpecialCommand = specialCommands.some(cmd => normalizedMessage === cmd || normalizedMessage.startsWith(cmd + ' '));
       
       if (nameOnly && /^[a-zA-Z]+(?:\s+[a-zA-Z]+)*$/.test(nameOnly) && !isSpecialCommand) {
@@ -3630,17 +3126,10 @@ async function checkPatternMatches(message: string, currentState: any = null, is
   // Check for rename crew input (must come before CHECK_CREW_MEMBERS to avoid matching crew names)
   if (currentState?.waiting_for === 'rename_crew_input') {
     const normalizedMessage = message.toLowerCase().trim();
-    if (normalizedMessage === 'done' || normalizedMessage === 'back') {
+    if (normalizedMessage === 'done') {
       return {
         action: 'CREW_CHECK_DONE',
         extractedData: {}
-      };
-    }
-    // Check for blank/empty message
-    if (!message || message.trim().length === 0) {
-      return {
-        action: 'RENAME_CREW_INPUT_INVALID',
-        extractedData: { error: 'blank_message' }
       };
     }
     // Any other input is treated as new crew name
@@ -3678,34 +3167,18 @@ async function checkPatternMatches(message: string, currentState: any = null, is
            };
          }
          
-         // Check for "Next/N", "Prev/P", and "Done/D" in crew selection pagination
+         // Check for "More" in crew selection pagination
          if (currentState?.waiting_for === 'crew_selection_manage') {
            const normalizedMessage = message.toLowerCase().trim();
-           if (normalizedMessage === 'next' || normalizedMessage === 'n') {
+           if (normalizedMessage === 'more') {
              return {
                action: 'CREW_SELECTION_MORE',
                extractedData: {}
              };
            }
-           if (normalizedMessage === 'prev' || normalizedMessage === 'p' || normalizedMessage === 'previous') {
+           if (normalizedMessage === 'back') {
              return {
                action: 'CREW_SELECTION_BACK',
-               extractedData: {}
-             };
-           }
-           if (normalizedMessage === 'done' || normalizedMessage === 'd') {
-             return {
-               action: 'CREW_CHECK_DONE',
-               extractedData: {}
-             };
-           }
-           if (normalizedMessage === 'create crew' || normalizedMessage.startsWith('create crew ')) {
-             // Allow CREATE_CREW to be handled by its pattern matcher
-             // Don't return here, let it fall through
-           } else if (normalizedMessage !== 'exit' && normalizedMessage !== 'quit' && normalizedMessage !== 'stop') {
-             // Invalid input in crew_selection_manage state
-             return {
-               action: 'INVALID_UNCLEAR_COMMAND',
                extractedData: {}
              };
            }
@@ -3722,8 +3195,8 @@ async function checkPatternMatches(message: string, currentState: any = null, is
            }
          }
          
-         // Check for "done" in crew_management_menu state (return to menu)
-         if (currentState?.waiting_for === 'crew_management_menu') {
+         // Check for member removal selection (numbers, More, Back, back, done)
+         if (currentState?.waiting_for === 'remove_members_selection' || currentState?.waiting_for === 'remove_members_pagination') {
            const normalizedMessage = message.toLowerCase().trim();
            if (normalizedMessage === 'done') {
              return {
@@ -3731,35 +3204,13 @@ async function checkPatternMatches(message: string, currentState: any = null, is
                extractedData: {}
              };
            }
-         }
-         
-         // Check for invalid input in crew_management_menu state (non-numeric input)
-         if (currentState?.waiting_for === 'crew_management_menu' && !numericMatch) {
-           const normalizedMessage = message.toLowerCase().trim();
-           if (normalizedMessage !== 'exit' && normalizedMessage !== 'quit' && normalizedMessage !== 'stop' && normalizedMessage !== 'done') {
-             return {
-               action: 'INVALID_UNCLEAR_COMMAND',
-               extractedData: {}
-             };
-           }
-         }
-         
-         // Check for member removal selection (numbers, Next/N, Prev/P, Done/D)
-         if (currentState?.waiting_for === 'remove_members_selection' || currentState?.waiting_for === 'remove_members_pagination') {
-           const normalizedMessage = message.toLowerCase().trim();
-           if (normalizedMessage === 'done' || normalizedMessage === 'd') {
-             return {
-               action: 'CREW_CHECK_DONE',
-               extractedData: {}
-             };
-           }
-           if (normalizedMessage === 'prev' || normalizedMessage === 'p' || normalizedMessage === 'previous') {
+           if (normalizedMessage === 'back') {
              return {
                action: 'REMOVE_MEMBERS_BACK',
                extractedData: {}
              };
            }
-           if (normalizedMessage === 'next' || normalizedMessage === 'n') {
+           if (normalizedMessage === 'more') {
              return {
                action: 'REMOVE_MEMBERS_MORE',
                extractedData: {}
@@ -3800,11 +3251,6 @@ async function checkPatternMatches(message: string, currentState: any = null, is
                extractedData: {}
              };
            }
-           // Invalid input - return specific action for error handling
-           return {
-             action: 'DELETE_CREW_INVALID_INPUT',
-             extractedData: { invalid_input: message.trim() }
-           };
          }
          
          // Handle "exit" in all management states
@@ -3994,22 +3440,6 @@ async function checkPatternMatches(message: string, currentState: any = null, is
   
   // Check for invalid input in post_crew_members_view state
   if (currentState?.waiting_for === 'post_crew_members_view') {
-    return {
-      action: 'INVALID_UNCLEAR_COMMAND',
-      extractedData: {}
-    };
-  }
-  
-  // Check for invalid input in crew_management_menu state
-  if (currentState?.waiting_for === 'crew_management_menu') {
-    return {
-      action: 'INVALID_UNCLEAR_COMMAND',
-      extractedData: {}
-    };
-  }
-  
-  // Check for invalid input in crew_selection_manage state
-  if (currentState?.waiting_for === 'crew_selection_manage') {
     return {
       action: 'INVALID_UNCLEAR_COMMAND',
       extractedData: {}
@@ -5014,8 +4444,7 @@ if (is_host === true) {
     }
     
     // Check usage limits for substantive interactions only (skip for simple navigation/casual responses)
-    // TEMPORARILY DISABLED FOR TESTING
-    if (false && !skipUsageTracking) {
+    if (!skipUsageTracking) {
       console.log('🔒 Checking AI usage limits before processing...');
       
       try {
@@ -5153,27 +4582,16 @@ if (is_host === true) {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
         } else {
-          // Create crew immediately (allow duplicate names)
-          const { data: crewData, error: crewError } = await supabase
+          // Check for duplicate crew name
+          const { data: existingCrew } = await supabase
             .from('crews')
-            .insert({
-              creator_id: userId,
-              name: crewName,
-              description: `Crew created via CREATE_CREW command`,
-              crew_type: 'social',
-              settings: {
-                visibility: 'private',
-                auto_invite_new_members: false
-              }
-            })
             .select('id, name')
+            .eq('creator_id', userId)
+            .eq('name', crewName)
             .single();
-
-          if (crewError) {
-            console.error('Error creating crew:', crewError);
-            
-            const responseContent = 'Failed to create crew. Please try again.';
-            
+          
+          if (existingCrew) {
+            responseContent = `Sorry, a crew named "${crewName}" already exists. Please try a different name.`;
             shouldSendSMS = true;
             await sendSMS(phone_number, responseContent, send_sms, phone_number);
             
@@ -5186,6 +4604,42 @@ if (is_host === true) {
               headers: { ...corsHeaders, 'Content-Type': 'application/json' }
             });
           } else {
+            // Create crew immediately
+            const { data: crewData, error: crewError } = await supabase
+              .from('crews')
+              .insert({
+                creator_id: userId,
+                name: crewName,
+                description: `Crew created via CREATE_CREW command`,
+                crew_type: 'social',
+                settings: {
+                  visibility: 'private',
+                  auto_invite_new_members: false
+                }
+              })
+              .select('id, name')
+              .single();
+
+            if (crewError) {
+              console.error('Error creating crew:', crewError);
+              
+              let responseContent = 'Failed to create crew. Please try again.';
+              if (crewError.code === '23505') {
+                responseContent = `Sorry, a crew named "${crewName}" already exists. Please try a different name.`;
+              }
+              
+              shouldSendSMS = true;
+              await sendSMS(phone_number, responseContent, send_sms, phone_number);
+              
+              return new Response(JSON.stringify({
+                success: true,
+                action: 'CREATE_CREW',
+                response: responseContent,
+                optimization: 'pattern_matching'
+              }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+              });
+            } else {
               console.log('Successfully created crew:', crewData.id);
               
               // Wait for invite URL generation
@@ -5247,6 +4701,7 @@ if (is_host === true) {
               }), {
                 headers: { ...corsHeaders, 'Content-Type': 'application/json' }
               });
+            }
           }
         }
       } else if (action === 'ONBOARDING_START') {
@@ -5463,7 +4918,7 @@ if (is_host === true) {
         console.log('MANAGE_EVENT detected via pattern matching');
         
         try {
-          const eventName = extractedData.event_name; // This should now preserve case from checkManageEventPattern
+          const eventName = extractedData.event_name;
           
           // Get user's events (only creator's own events, not invited events)
           // Order by soonest upcoming first
@@ -5498,82 +4953,14 @@ if (is_host === true) {
             responseContent = await showEventDetailsAndMenu(supabase, userId, phone_number, send_sms, userEvents[0].id, phone_number);
             shouldSendSMS = true;
           } else if (eventName) {
-            // Find all events matching the name (case-insensitive comparison)
-            const matchingEvents = userEvents.filter(e => 
+            // Try to find exact match
+            const exactMatch = userEvents.find(e => 
               e.title.toLowerCase() === eventName.toLowerCase()
             );
             
-            if (matchingEvents.length === 1) {
-              // Only one match - auto-select it
-              responseContent = await showEventDetailsAndMenu(supabase, userId, phone_number, send_sms, matchingEvents[0].id, phone_number);
+            if (exactMatch) {
+              responseContent = await showEventDetailsAndMenu(supabase, userId, phone_number, send_sms, exactMatch.id, phone_number);
               shouldSendSMS = true;
-            } else if (matchingEvents.length >= 2) {
-              // Multiple matches - show list of matching events
-              const page = 0;
-              const pageSize = 5;
-              const totalEvents = matchingEvents.length;
-              const eventsOnPage = matchingEvents.slice(page * pageSize, (page + 1) * pageSize);
-              
-              // Use original eventName from user input (preserve case)
-              let eventList = `Found ${totalEvents} event${totalEvents === 1 ? '' : 's'} named "${eventName}".\n\nWhich one would you like to manage?\n\n`;
-              eventsOnPage.forEach((event, index) => {
-                const eventDate = new Date(`${event.event_date}T${event.start_time || '00:00:00'}`);
-                const formattedDate = eventDate.toLocaleDateString('en-US', {
-                  weekday: 'short',
-                  month: 'short',
-                  day: 'numeric',
-                  hour: 'numeric',
-                  minute: '2-digit',
-                  hour12: true
-                });
-                eventList += `${index + 1}. ${event.title} — ${formattedDate}`;
-                if (event.location) {
-                  eventList += ` (${event.location})`;
-                }
-                eventList += '\n';
-              });
-              
-              const hasMore = totalEvents > (page + 1) * pageSize;
-              const hasPrevious = page > 0;
-              eventList += '\n';
-              
-              // Build prompt with conditional pagination
-              if (eventsOnPage.length < pageSize) {
-                eventList += `Reply with a number (1-${eventsOnPage.length})`;
-              } else {
-                eventList += 'Reply with a number (1-5)';
-              }
-              
-              // Only show pagination actions if available
-              if (hasMore && hasPrevious) {
-                eventList += ', \'Next\' or \'N\' for the next 5, \'Prev\' or \'P\' for the previous 5';
-              } else if (hasMore) {
-                eventList += ', \'Next\' or \'N\' for the next 5';
-              } else if (hasPrevious) {
-                eventList += ', \'Prev\' or \'P\' for the previous 5';
-              }
-              eventList += ', \'Done\' or \'D\' to return to menu, or \'exit\'.';
-              
-              responseContent = eventList;
-              shouldSendSMS = true;
-              
-              // Save state with pagination
-              await supabase
-                .from('conversation_state')
-                .upsert({
-                  user_id: userId,
-                  phone_number: phone_number,
-                  waiting_for: 'manage_event_selection',
-                  current_state: 'manage_event_selection',
-                  extracted_data: [{
-                    action: 'MANAGE_EVENT',
-                    current_page: page,
-                    event_list: matchingEvents.map(e => ({ id: e.id, title: e.title, event_date: e.event_date, start_time: e.start_time, location: e.location })),
-                    timestamp: new Date().toISOString()
-                  }]
-                }, {
-                  onConflict: 'user_id'
-                });
             } else {
               // No exact match - show paginated list
               const page = 0;
@@ -5600,25 +4987,12 @@ if (is_host === true) {
               });
               
               const hasMore = totalEvents > (page + 1) * pageSize;
-              const hasPrevious = page > 0;
               eventList += '\n';
-              
-              // Build prompt with conditional pagination
-              if (eventsOnPage.length < pageSize) {
-                eventList += `Reply with a number (1-${eventsOnPage.length})`;
+              if (hasMore) {
+                eventList += 'Reply with a number (1-5), \'More\' to see the next 5, or \'exit\'.';
               } else {
-                eventList += 'Reply with a number (1-5)';
+                eventList += `Reply with a number (1-${eventsOnPage.length}), or \'exit\'.`;
               }
-              
-              // Only show pagination actions if available
-              if (hasMore && hasPrevious) {
-                eventList += ', \'Next\' or \'N\' for the next 5, \'Prev\' or \'P\' for the previous 5';
-              } else if (hasMore) {
-                eventList += ', \'Next\' or \'N\' for the next 5';
-              } else if (hasPrevious) {
-                eventList += ', \'Prev\' or \'P\' for the previous 5';
-              }
-              eventList += ', \'Done\' or \'D\' to return to menu, or \'exit\'.';
               
               responseContent = eventList;
               shouldSendSMS = true;
@@ -5736,20 +5110,37 @@ if (is_host === true) {
           const actualIndex = (currentPage * pageSize) + eventIndex;
           
           if (eventIndex < 0 || eventIndex >= pageSize || actualIndex < 0 || actualIndex >= eventList.length) {
-            // Invalid selection - show error message only (don't re-display list)
-            const hasMore = eventList.length > (currentPage + 1) * pageSize;
-            const hasPrevious = currentPage > 0;
-            if (hasMore && hasPrevious) {
-              responseContent = 'I didn\'t understand that. Reply with a number (1–5), \'Next\' or \'N\', \'Prev\' or \'P\', \'Done\' or \'D\', or \'exit\'.';
-            } else if (hasMore) {
-              responseContent = 'I didn\'t understand that. Reply with a number (1–5), \'Next\' or \'N\', \'Done\' or \'D\', or \'exit\'.';
-            } else if (hasPrevious) {
-              const eventsOnPage = eventList.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
-              responseContent = `I didn't understand that. Reply with a number (1–${eventsOnPage.length}), 'Prev' or 'P', 'Done' or 'D', or 'exit'.`;
+            // Show event list again with error message
+            const totalEvents = eventList.length;
+            const eventsOnPage = eventList.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
+            
+            let eventListText = `You have ${totalEvents} upcoming event${totalEvents === 1 ? '' : 's'}.\n\nWhich event would you like to manage?\n\n`;
+            eventsOnPage.forEach((event, index) => {
+              const eventDate = new Date(`${event.event_date}T${event.start_time || '00:00:00'}`);
+              const formattedDate = eventDate.toLocaleDateString('en-US', {
+                weekday: 'short',
+                month: 'short',
+                day: 'numeric',
+                hour: 'numeric',
+                minute: '2-digit',
+                hour12: true
+              });
+              eventListText += `${index + 1}. ${event.title} — ${formattedDate}`;
+              if (event.location) {
+                eventListText += ` (${event.location})`;
+              }
+              eventListText += '\n';
+            });
+            
+            const hasMore = totalEvents > (currentPage + 1) * pageSize;
+            eventListText += '\n';
+            if (hasMore) {
+              eventListText += 'Invalid selection.\nReply with a number (1-5), \'More\' to see the next 5, or \'exit\'.';
             } else {
-              const eventsOnPage = eventList.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
-              responseContent = `I didn't understand that. Reply with a number (1–${eventsOnPage.length}), 'Done' or 'D', or 'exit'.`;
+              eventListText += `Invalid selection.\nReply with a number (1-${eventsOnPage.length}), or \'exit\'.`;
             }
+            
+            responseContent = eventListText;
             shouldSendSMS = true;
             await sendSMS(phone_number, responseContent, send_sms, phone_number);
             return new Response(JSON.stringify({
@@ -5836,25 +5227,12 @@ if (is_host === true) {
           });
           
           const hasMore = totalEvents > (newPage + 1) * pageSize;
-          const hasPrevious = newPage > 0;
           eventListText += '\n';
-          
-          // Build prompt with conditional pagination
-          if (eventsOnPage.length < pageSize) {
-            eventListText += `Reply with a number (1-${eventsOnPage.length})`;
+          if (hasMore) {
+            eventListText += 'Reply with a number (1-5), \'More\' for the next 5, \'Back\' for the previous 5, or \'exit\'.';
           } else {
-            eventListText += 'Reply with a number (1-5)';
+            eventListText += `Reply with a number (1-${eventsOnPage.length}), \'Back\' for the previous 5, or \'exit\'.`;
           }
-          
-          // Only show pagination actions if available
-          if (hasMore && hasPrevious) {
-            eventListText += ', \'Next\' or \'N\' for the next 5, \'Prev\' or \'P\' for the previous 5';
-          } else if (hasMore) {
-            eventListText += ', \'Next\' or \'N\' for the next 5';
-          } else if (hasPrevious) {
-            eventListText += ', \'Prev\' or \'P\' for the previous 5';
-          }
-          eventListText += ', \'Done\' or \'D\' to return to menu, or \'exit\'.';
           
           responseContent = eventListText;
           shouldSendSMS = true;
@@ -5942,25 +5320,20 @@ if (is_host === true) {
           });
           
           const hasMore = totalEvents > (newPage + 1) * pageSize;
-          const hasPrevious = newPage > 0;
           eventListText += '\n';
-          
-          // Build prompt with conditional pagination
-          if (eventsOnPage.length < pageSize) {
-            eventListText += `Reply with a number (1-${eventsOnPage.length})`;
+          if (newPage === 0) {
+            if (hasMore) {
+              eventListText += 'Reply with a number (1-5), \'More\' to see the next 5, or \'exit\'.';
+            } else {
+              eventListText += `Reply with a number (1-${eventsOnPage.length}), or \'exit\'.`;
+            }
           } else {
-            eventListText += 'Reply with a number (1-5)';
+            if (hasMore) {
+              eventListText += 'Reply with a number (1-5), \'More\' for the next 5, \'Back\' for the previous 5, or \'exit\'.';
+            } else {
+              eventListText += `Reply with a number (1-${eventsOnPage.length}), \'Back\' for the previous 5, or \'exit\'.`;
+            }
           }
-          
-          // Only show pagination actions if available
-          if (hasMore && hasPrevious) {
-            eventListText += ', \'Next\' or \'N\' for the next 5, \'Prev\' or \'P\' for the previous 5';
-          } else if (hasMore) {
-            eventListText += ', \'Next\' or \'N\' for the next 5';
-          } else if (hasPrevious) {
-            eventListText += ', \'Prev\' or \'P\' for the previous 5';
-          }
-          eventListText += ', \'Done\' or \'D\' to return to menu, or \'exit\'.';
           
           responseContent = eventListText;
           shouldSendSMS = true;
@@ -6001,50 +5374,6 @@ if (is_host === true) {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
         }
-      } else if (action === 'MANAGE_EVENT_DONE') {
-        console.log('MANAGE_EVENT_DONE detected via pattern matching');
-        
-        try {
-          // Return to main menu by clearing the event selection state
-          // This effectively ends the MANAGE_EVENT flow and returns to normal state
-          responseContent = 'What would you like to do next?';
-          shouldSendSMS = true;
-          
-          // Clear conversation state to return to normal
-          await supabase
-            .from('conversation_state')
-            .update({
-              waiting_for: null,
-              current_state: 'normal',
-              extracted_data: [],
-              last_action: 'MANAGE_EVENT_DONE',
-              last_action_timestamp: new Date().toISOString()
-            })
-            .eq('user_id', userId);
-          
-          await sendSMS(phone_number, responseContent, send_sms, phone_number);
-          return new Response(JSON.stringify({
-            success: true,
-            action: 'MANAGE_EVENT_DONE',
-            response: responseContent,
-            optimization: 'pattern_matching'
-          }), {
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-          });
-        } catch (error) {
-          console.error('Error in MANAGE_EVENT_DONE:', error);
-          responseContent = 'Failed to return to menu. Please try again.';
-          shouldSendSMS = true;
-          await sendSMS(phone_number, responseContent, send_sms, phone_number);
-          return new Response(JSON.stringify({
-            success: true,
-            action: 'MANAGE_EVENT_DONE',
-            response: responseContent,
-            optimization: 'pattern_matching'
-          }), {
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-          });
-        }
       } else if (action === 'EVENT_MANAGEMENT_MENU_SELECTION') {
         console.log('EVENT_MANAGEMENT_MENU_SELECTION detected via pattern matching');
         
@@ -6055,8 +5384,9 @@ if (is_host === true) {
           
           // Validate menu option range (1-5)
           if (menuOption < 1 || menuOption > 5) {
-            // Invalid selection - show error message only (don't re-display menu)
-            responseContent = 'I didn\'t understand that. Reply with a number (1–5), or type \'exit\'.';
+            // Show menu again with error message
+            const menuDisplay = await showEventDetailsAndMenu(supabase, userId, phone_number, send_sms, eventId, phone_number);
+            responseContent = `Invalid selection.\n${menuDisplay}`;
             shouldSendSMS = true;
             await sendSMS(phone_number, responseContent, send_sms, phone_number);
             return new Response(JSON.stringify({
@@ -6071,7 +5401,8 @@ if (is_host === true) {
           
           if (menuOption === 1) {
             // Edit Event Details
-            responseContent = `What would you like to change? (name/date/time/location/notes)`;
+            responseContent = `What would you like to edit for "${eventTitle}"?\n\n`;
+            responseContent += `Reply with: Name, Date, Time, Location, or Notes`;
             shouldSendSMS = true;
             
             // Update state
@@ -6179,7 +5510,8 @@ if (is_host === true) {
             });
           } else if (menuOption === 3) {
             // Duplicate Event
-            responseContent = `What should we call the new event? Type a new name or 'same' to keep '${eventTitle}'.`;
+            responseContent = `Let's duplicate "${eventTitle}".\n\n`;
+            responseContent += `What should the new event be called? Reply with a name, or \'Same\' to keep the same name.`;
             shouldSendSMS = true;
             
             // Update state
@@ -6208,7 +5540,8 @@ if (is_host === true) {
             });
           } else if (menuOption === 4) {
             // Delete Event
-            responseContent = `Delete '${eventTitle}'? Type 'delete' to confirm or 'exit' to stop.`;
+            responseContent = `Are you sure you want to delete "${eventTitle}"?\n\n`;
+            responseContent += `This action cannot be undone. Type \'delete\' to confirm, or \'exit\' to cancel.`;
             shouldSendSMS = true;
             
             // Update state
@@ -6237,7 +5570,7 @@ if (is_host === true) {
             });
           } else if (menuOption === 5) {
             // Exit
-            responseContent = 'What would you like to do next?';
+            responseContent = 'Exited event management.';
             shouldSendSMS = true;
             
             // Clear state
@@ -6285,14 +5618,14 @@ if (is_host === true) {
           // Get current value
           const { data: eventData } = await supabase
             .from('events')
-            .select('title, event_date, start_time, end_time, location, notes')
+            .select('title, event_date, start_time, location, notes')
             .eq('id', eventId)
             .single();
           
           let currentValue = '';
           if (field === 'name') currentValue = eventData.title;
-          else if (field === 'date') currentValue = formatEventDate(eventData.event_date);
-          else if (field === 'time') currentValue = formatEventTime(eventData.start_time, eventData.end_time);
+          else if (field === 'date') currentValue = eventData.event_date;
+          else if (field === 'time') currentValue = eventData.start_time;
           else if (field === 'location') currentValue = eventData.location || 'Not set';
           else if (field === 'notes') currentValue = eventData.notes || 'Not set';
           
@@ -6572,25 +5905,10 @@ if (is_host === true) {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
         }
-      } else if (action === 'INVALID_EVENT_EDIT_FIELD_SELECTION') {
-        console.log('INVALID_EVENT_EDIT_FIELD_SELECTION detected via pattern matching');
-        
-        responseContent = `I didn't understand that. Type one of: name, date, time, location, notes — or 'exit'.`;
-        shouldSendSMS = true;
-        
-        await sendSMS(phone_number, responseContent, send_sms, phone_number);
-        return new Response(JSON.stringify({
-          success: true,
-          action: 'INVALID_EVENT_EDIT_FIELD_SELECTION',
-          response: responseContent,
-          optimization: 'pattern_matching'
-        }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
       } else if (action === 'INVALID_EVENT_EDIT_CONTINUE') {
         console.log('INVALID_EVENT_EDIT_CONTINUE detected via pattern matching');
         
-        responseContent = `I didn't understand that. Edit another field? (name/date/time/location/notes) or type 'Done'`;
+        responseContent = `I didn't understand that. Edit another field? (Name/Date/Time/Location/Notes) or type 'Done'`;
         shouldSendSMS = true;
         
         await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6916,7 +6234,8 @@ if (is_host === true) {
             newEventName = extractedData?.name;
           }
           
-          responseContent = `Enter the new date (e.g., Fri Nov 21).`;
+          responseContent = `Great! The new event will be called "${newEventName}".\n\n`;
+          responseContent += `When should it be? Enter the date (e.g., 2025-12-31):`;
           shouldSendSMS = true;
           
           // Update state
@@ -6957,35 +6276,6 @@ if (is_host === true) {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
         }
-      } else if (action === 'DUPLICATE_EVENT_NAME_INVALID_INPUT') {
-        console.log('DUPLICATE_EVENT_NAME_INVALID_INPUT detected via pattern matching');
-        
-        try {
-          responseContent = "I didn't understand that. Reply 'same' or type a new name – or type 'exit'.";
-          shouldSendSMS = true;
-          await sendSMS(phone_number, responseContent, send_sms, phone_number);
-          return new Response(JSON.stringify({
-            success: true,
-            action: 'DUPLICATE_EVENT_NAME_INVALID_INPUT',
-            response: responseContent,
-            optimization: 'pattern_matching'
-          }), {
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-          });
-        } catch (error) {
-          console.error('Error in DUPLICATE_EVENT_NAME_INVALID_INPUT:', error);
-          responseContent = 'Failed to process input. Please try again.';
-          shouldSendSMS = true;
-          await sendSMS(phone_number, responseContent, send_sms, phone_number);
-          return new Response(JSON.stringify({
-            success: true,
-            action: 'DUPLICATE_EVENT_NAME_INVALID_INPUT',
-            response: responseContent,
-            optimization: 'pattern_matching'
-          }), {
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-          });
-        }
       } else if (action === 'DUPLICATE_EVENT_DATE_INPUT') {
         console.log('DUPLICATE_EVENT_DATE_INPUT detected via pattern matching');
         
@@ -6994,89 +6284,19 @@ if (is_host === true) {
           const newEventName = conversationState?.extracted_data?.[0]?.new_event_name;
           const sourceEventId = conversationState?.extracted_data?.[0]?.source_event_id;
           
-          // Check for explicit year in the input (e.g., "Jan 1 2024", "Nov 1 2024")
-          const yearMatch = dateValue.match(/\b(19|20)\d{2}\b/);
-          if (yearMatch) {
-            const explicitYear = parseInt(yearMatch[0]);
-            const currentYear = new Date().getFullYear();
-            if (explicitYear < currentYear) {
-              // Explicit past year - reject immediately
-              responseContent = "Date/time must be in the future. Enter a new value or type 'exit'.";
-              shouldSendSMS = true;
-              await sendSMS(phone_number, responseContent, send_sms, phone_number);
-              return new Response(JSON.stringify({
-                success: true,
-                action: 'DUPLICATE_EVENT_DATE_INPUT',
-                response: responseContent,
-                optimization: 'pattern_matching'
-              }), {
-                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-              });
-            }
-          }
-          
           // Use convertDayNameToDate to parse natural language dates (same as Update Event)
           const parsedDateStr = convertDayNameToDate(dateValue);
-          
-          // Get today's date string in YYYY-MM-DD format (UTC) for comparison
-          const now = new Date();
-          const todayDateStr = now.toISOString().split('T')[0];
-          
-          // Validate immediately: check if parsed date string is in YYYY-MM-DD format
+          let inputDate: Date;
           let validatedValue: string;
+          
+          // Check if convertDayNameToDate returned a YYYY-MM-DD format or the original string
           if (/^\d{4}-\d{2}-\d{2}$/.test(parsedDateStr)) {
-            // It's a valid YYYY-MM-DD date - compare date strings directly
-            if (parsedDateStr <= todayDateStr) {
-              // Date is today or in the past - reject immediately
-              responseContent = "Date/time must be in the future. Enter a new value or type 'exit'.";
-              shouldSendSMS = true;
-              await sendSMS(phone_number, responseContent, send_sms, phone_number);
-              return new Response(JSON.stringify({
-                success: true,
-                action: 'DUPLICATE_EVENT_DATE_INPUT',
-                response: responseContent,
-                optimization: 'pattern_matching'
-              }), {
-                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-              });
-            }
-            
-            // Additional validation: ensure the date is actually in the future (not just today)
-            // Create a date object at start of the parsed date (midnight UTC)
-            const parsedDate = new Date(parsedDateStr + 'T00:00:00Z');
-            if (isNaN(parsedDate.getTime()) || parsedDate <= now) {
-              responseContent = "Date/time must be in the future. Enter a new value or type 'exit'.";
-              shouldSendSMS = true;
-              await sendSMS(phone_number, responseContent, send_sms, phone_number);
-              return new Response(JSON.stringify({
-                success: true,
-                action: 'DUPLICATE_EVENT_DATE_INPUT',
-                response: responseContent,
-                optimization: 'pattern_matching'
-              }), {
-                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-              });
-            }
-            
+            // It's a valid YYYY-MM-DD date
+            inputDate = new Date(parsedDateStr + 'T00:00:00');
             validatedValue = parsedDateStr; // Store as YYYY-MM-DD
           } else {
-            // Try parsing as-is to convert to YYYY-MM-DD
-            // For dates with explicit years, parse in UTC to avoid timezone issues
-            let inputDate: Date;
-            if (/\b(19|20)\d{2}\b/.test(parsedDateStr)) {
-              // Date has explicit year - parse carefully to avoid timezone issues
-              // Create date at noon UTC to avoid day shift
-              const tempDate = new Date(parsedDateStr + ' UTC');
-              if (isNaN(tempDate.getTime())) {
-                // Try parsing as local time if UTC fails
-                inputDate = new Date(parsedDateStr);
-              } else {
-                inputDate = tempDate;
-              }
-            } else {
-              inputDate = new Date(parsedDateStr);
-            }
-            
+            // Try parsing as-is
+            inputDate = new Date(parsedDateStr);
             if (isNaN(inputDate.getTime())) {
               responseContent = "Date/time must be in the future. Enter a new value or type 'exit'.";
               shouldSendSMS = true;
@@ -7090,47 +6310,29 @@ if (is_host === true) {
                 headers: { ...corsHeaders, 'Content-Type': 'application/json' }
               });
             }
-            
-            // Convert to YYYY-MM-DD format using UTC date components to avoid timezone shift
-            const year = inputDate.getUTCFullYear();
-            const month = String(inputDate.getUTCMonth() + 1).padStart(2, '0');
-            const day = String(inputDate.getUTCDate()).padStart(2, '0');
-            validatedValue = `${year}-${month}-${day}`;
-            
-            // Validate the converted date string is in the future
-            if (validatedValue <= todayDateStr) {
-              responseContent = "Date/time must be in the future. Enter a new value or type 'exit'.";
-              shouldSendSMS = true;
-              await sendSMS(phone_number, responseContent, send_sms, phone_number);
-              return new Response(JSON.stringify({
-                success: true,
-                action: 'DUPLICATE_EVENT_DATE_INPUT',
-                response: responseContent,
-                optimization: 'pattern_matching'
-              }), {
-                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-              });
-            }
-            
-            // Additional validation: ensure the date is actually in the future (not just today)
-            // Create a date object at start of the parsed date (midnight UTC)
-            const parsedDate = new Date(validatedValue + 'T00:00:00Z');
-            if (isNaN(parsedDate.getTime()) || parsedDate <= now) {
-              responseContent = "Date/time must be in the future. Enter a new value or type 'exit'.";
-              shouldSendSMS = true;
-              await sendSMS(phone_number, responseContent, send_sms, phone_number);
-              return new Response(JSON.stringify({
-                success: true,
-                action: 'DUPLICATE_EVENT_DATE_INPUT',
-                response: responseContent,
-                optimization: 'pattern_matching'
-              }), {
-                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-              });
-            }
+            // Convert to YYYY-MM-DD format
+            validatedValue = inputDate.toISOString().split('T')[0];
           }
           
-          responseContent = `Enter the new time (e.g., 7:00 PM).`;
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+          inputDate.setHours(0, 0, 0, 0);
+          
+          if (inputDate <= today) {
+            responseContent = "Date/time must be in the future. Enter a new value or type 'exit'.";
+            shouldSendSMS = true;
+            await sendSMS(phone_number, responseContent, send_sms, phone_number);
+            return new Response(JSON.stringify({
+              success: true,
+              action: 'DUPLICATE_EVENT_DATE_INPUT',
+              response: responseContent,
+              optimization: 'pattern_matching'
+            }), {
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+          }
+          
+          responseContent = `Perfect! What time? Enter the time (e.g., 14:30):`;
           shouldSendSMS = true;
           
           // Update state
@@ -7211,26 +6413,8 @@ if (is_host === true) {
               });
             }
           } else if (/^\d{2}:\d{2}(:\d{2})?$/.test(validatedTime)) {
-            // Already in HH:MM or HH:MM:SS format - validate hours and minutes
-            const parts = validatedTime.split(':');
-            const hours = parseInt(parts[0]);
-            const minutes = parseInt(parts[1]);
-            
-            if (hours >= 0 && hours < 24 && minutes >= 0 && minutes < 60) {
-              validatedTime = validatedTime.length === 5 ? `${validatedTime}:00` : validatedTime;
-            } else {
-              responseContent = "Date/time must be in the future. Enter a new value or type 'exit'.";
-              shouldSendSMS = true;
-              await sendSMS(phone_number, responseContent, send_sms, phone_number);
-              return new Response(JSON.stringify({
-                success: true,
-                action: 'DUPLICATE_EVENT_TIME_INPUT',
-                response: responseContent,
-                optimization: 'pattern_matching'
-              }), {
-                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-              });
-            }
+            // Already in HH:MM or HH:MM:SS format
+            validatedTime = validatedTime.length === 5 ? `${validatedTime}:00` : validatedTime;
           } else {
             responseContent = "Date/time must be in the future. Enter a new value or type 'exit'.";
             shouldSendSMS = true;
@@ -7518,67 +6702,8 @@ if (is_host === true) {
         console.log('DUPLICATE_SEND_INVITATIONS_NO detected via pattern matching');
         
         try {
-          // Get event details from conversation state
-          const eventData = conversationState?.extracted_data?.[0];
-          const newEventName = eventData?.new_event_name;
-          const newEventDate = eventData?.new_event_date;
-          const validatedTime = eventData?.new_event_time;
-          const newEventLocation = eventData?.new_event_location;
-          const newEventNotes = eventData?.new_event_notes;
-          const newEventCrewId = eventData?.new_event_crew_id;
-          
-          // Create the event but don't send invitations
-          const { data: newEvent, error: createError } = await supabase
-            .from('events')
-            .insert({
-              title: newEventName,
-              event_date: newEventDate,
-              start_time: validatedTime,
-              location: newEventLocation,
-              notes: newEventNotes,
-              crew_id: newEventCrewId, // Copy crew_id from source event
-              creator_id: userId,
-              status: 'active'
-            })
-            .select()
-            .single();
-          
-          if (createError || !newEvent) {
-            console.error('Error creating duplicate event:', createError);
-            responseContent = 'Failed to create event. Please try again.';
-            shouldSendSMS = true;
-            await sendSMS(phone_number, responseContent, send_sms, phone_number);
-            return new Response(JSON.stringify({
-              success: true,
-              action: 'DUPLICATE_SEND_INVITATIONS_NO',
-              response: responseContent,
-              optimization: 'pattern_matching'
-            }), {
-              headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-            });
-          }
-          
-          // Get event link for confirmation
-          const { shorten_event_url, event: eventDataWithUrl } = await fetchEventWithShortUrl(supabase, newEvent.id, userId);
-          const eventLink = formatEventLink(newEvent.id, shorten_event_url);
-          
-          // Format date and time
-          let dateStr = '';
-          let timeStr = '';
-          
-          if (eventDataWithUrl && eventDataWithUrl.event_date) {
-            const eventDate = new Date(eventDataWithUrl.event_date + 'T00:00:00');
-            dateStr = eventDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-          }
-          
-          if (eventDataWithUrl && eventDataWithUrl.start_time) {
-            const [hours, minutes] = eventDataWithUrl.start_time.split(':').map(Number);
-            const timeDate = new Date();
-            timeDate.setHours(hours, minutes, 0, 0);
-            timeStr = timeDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-          }
-          
-          responseContent = `Got it. Invitations not sent. Action ends.`;
+          // Don't create the event - user said no to invitations
+          responseContent = "Got it. Event not created. Action ends.";
           
           // Clear state
           await supabase
@@ -7614,35 +6739,6 @@ if (is_host === true) {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
         }
-      } else if (action === 'DELETE_EVENT_INVALID_INPUT') {
-        console.log('DELETE_EVENT_INVALID_INPUT detected via pattern matching');
-        
-        try {
-          responseContent = `I didn't understand that. Type 'delete' to confirm or 'exit'.`;
-          shouldSendSMS = true;
-          await sendSMS(phone_number, responseContent, send_sms, phone_number);
-          return new Response(JSON.stringify({
-            success: true,
-            action: 'DELETE_EVENT_INVALID_INPUT',
-            response: responseContent,
-            optimization: 'pattern_matching'
-          }), {
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-          });
-        } catch (error) {
-          console.error('Error in DELETE_EVENT_INVALID_INPUT:', error);
-          responseContent = 'Failed to process input. Please try again.';
-          shouldSendSMS = true;
-          await sendSMS(phone_number, responseContent, send_sms, phone_number);
-          return new Response(JSON.stringify({
-            success: true,
-            action: 'DELETE_EVENT_INVALID_INPUT',
-            response: responseContent,
-            optimization: 'pattern_matching'
-          }), {
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-          });
-        }
       } else if (action === 'DELETE_EVENT_CONFIRMED') {
         console.log('DELETE_EVENT_CONFIRMED detected via pattern matching');
         
@@ -7658,7 +6754,7 @@ if (is_host === true) {
           
           if (invitations && invitations.length > 0) {
             // Ask if they want to send cancellation message
-            responseContent = `Would you like to send a cancellation message to invitees? Reply 'yes' or 'no'.`;
+            responseContent = `Would you like to send a cancellation message to the ${invitations.length} invited guest${invitations.length === 1 ? '' : 's'}? Reply \'yes\' or \'no\'.`;
             shouldSendSMS = true;
             
             await supabase
@@ -7740,7 +6836,8 @@ if (is_host === true) {
           const eventId = conversationState?.extracted_data?.[0]?.event_id;
           const eventTitle = conversationState?.extracted_data?.[0]?.event_title;
           
-          responseContent = `Type a short message to include (or type 'skip' to send without a note).`;
+          responseContent = `What message would you like to send?\n\n`;
+          responseContent += `Type your cancellation message, or reply \'Skip\' to delete without a message.`;
           shouldSendSMS = true;
           
           await supabase
@@ -7802,7 +6899,7 @@ if (is_host === true) {
             console.error('Error deleting event:', deleteError);
             responseContent = 'Failed to delete event. Please try again.';
           } else {
-            responseContent = `Event deleted. No cancellation messages were sent. Action ends.`;
+            responseContent = `Event "${eventTitle}" has been deleted. No cancellation messages were sent.`;
           }
           
           // Clear state
@@ -7882,12 +6979,12 @@ if (is_host === true) {
             
             // Build response message
             if (sentCount > 0) {
-              responseContent = `Event deleted. Sent cancellation to ${sentCount} invitee${sentCount === 1 ? '' : 's'}. Action ends.`;
+              responseContent = `Event deleted. Sent cancellation to ${sentCount} invitee${sentCount === 1 ? '' : 's'}.`;
               if (failedCount > 0) {
                 responseContent += ` (${failedCount} failed)`;
               }
             } else {
-              responseContent = `Event deleted. Failed to send cancellation messages. Action ends.`;
+              responseContent = `Event deleted. Failed to send cancellation messages.`;
             }
           } else {
             responseContent = `Event "${eventTitle}" has been deleted.`;
@@ -7996,12 +7093,11 @@ if (is_host === true) {
               } else {
                 responseContent += `.`;
               }
-              responseContent += ` Action ends.`;
               if (failedCount > 0) {
                 responseContent += ` (${failedCount} failed)`;
               }
             } else {
-              responseContent = `Event deleted. Failed to send cancellation messages. Action ends.`;
+              responseContent = `Event deleted. Failed to send cancellation messages.`;
             }
           } else {
             responseContent = `Event "${eventTitle}" has been deleted.`;
@@ -8422,11 +7518,11 @@ if (is_host === true) {
                        const hasMore = totalMatches > pageSize;
                        crewList += '\n';
                        if (hasMore) {
-                         crewList += 'Reply with a number (1-5), \'Next\' or \'N\' for the next 5';
+                         crewList += 'Reply with a number (1-5), \'More\' to see the next 5';
                        } else {
                          crewList += 'Reply with a number (1-5)';
                        }
-                       crewList += ', \'Done\' or \'D\' to return to menu, \'Create Crew\' to make a new one, or \'exit\'.';
+                       crewList += ', \'Create Crew\' to make a new one, or \'exit\'.';
                        
                        responseContent = crewList;
                        shouldSendSMS = true;
@@ -8454,40 +7550,28 @@ if (is_host === true) {
                          console.error('Error saving conversation state:', stateError);
                        }
                      }
-                  } else {
-                    // No crew name - show paginated list (first 5)
-                    const page = 0;
-                    const pageSize = 5;
-                    const totalCrews = userCrews.length;
-                    const crewsOnPage = userCrews.slice(page * pageSize, (page + 1) * pageSize);
-                    
-                    let crewList = `You have ${totalCrews} crew${totalCrews === 1 ? '' : 's'}. Which crew would you like to manage?\n\n`;
-                    crewsOnPage.forEach((crew, index) => {
-                      crewList += `${index + 1}. ${crew.name}\n`;
-                    });
-                    
-                    const hasMore = totalCrews > (page + 1) * pageSize;
-                    const hasPrevious = page > 0;
-                    crewList += '\n';
-                    
-                    // Build prompt with conditional pagination
-                    if (crewsOnPage.length < pageSize) {
-                      crewList += `Reply with a number (1-${crewsOnPage.length})`;
-                    } else {
-                      crewList += 'Reply with a number (1-5)';
-                    }
-                    
-                    if (hasMore && hasPrevious) {
-                      crewList += ', \'Next\' or \'N\' for the next 5, \'Prev\' or \'P\' for the previous 5';
-                    } else if (hasMore) {
-                      crewList += ', \'Next\' or \'N\' for the next 5';
-                    } else if (hasPrevious) {
-                      crewList += ', \'Prev\' or \'P\' for the previous 5';
-                    }
-                    
-                    crewList += ', \'Done\' or \'D\' to return to menu, \'Create Crew\' to make a new one, or \'exit\'.';
-                    
-                    responseContent = crewList;
+                   } else {
+                     // No crew name - show paginated list (first 5)
+                     const page = 0;
+                     const pageSize = 5;
+                     const totalCrews = userCrews.length;
+                     const crewsOnPage = userCrews.slice(page * pageSize, (page + 1) * pageSize);
+                     
+                     let crewList = `You have ${totalCrews} crew${totalCrews === 1 ? '' : 's'}.\n\n`;
+                     crewsOnPage.forEach((crew, index) => {
+                       crewList += `${index + 1}. ${crew.name}\n`;
+                     });
+                     
+                     const hasMore = totalCrews > (page + 1) * pageSize;
+                     crewList += '\n';
+                     if (hasMore) {
+                       crewList += 'Reply with a number (1-5), \'More\' to see the next 5';
+                     } else {
+                       crewList += 'Reply with a number (1-5)';
+                     }
+                     crewList += ', \'Create Crew\' to make a new one, or \'exit\'.';
+                     
+                     responseContent = crewList;
                      shouldSendSMS = true;
                      
                      // Store crew list and page in conversation state
@@ -8553,22 +7637,32 @@ if (is_host === true) {
                  const actualIndex = (currentPage * pageSize) + crewIndex;
                  
                 if (crewIndex < 0 || crewIndex >= pageSize || actualIndex < 0 || actualIndex >= crewList.length) {
-                  // Invalid selection - show error message only (do NOT re-display list)
+                  // Show the crew list again with error message
                   const totalCrews = crewList.length;
-                  const hasMore = totalCrews > (currentPage + 1) * pageSize;
-                  const hasPrevious = currentPage > 0;
+                  const crewsOnPage = crewList.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
+                  const searchQuery = conversationState?.extracted_data?.[0]?.search_query;
                   
-                  responseContent = 'I didn\'t understand that. Reply with a crew number';
-                  // Only show pagination actions if available
-                  if (hasMore && hasPrevious) {
-                    responseContent += ', \'Next\' or \'N\', \'Prev\' or \'P\'';
-                  } else if (hasMore) {
-                    responseContent += ', \'Next\' or \'N\'';
-                  } else if (hasPrevious) {
-                    responseContent += ', \'Prev\' or \'P\'';
+                  let crewListText = '';
+                  if (searchQuery) {
+                    crewListText = `Found ${totalCrews} crew${totalCrews === 1 ? '' : 's'} matching '${searchQuery}'.\n\n`;
+                  } else {
+                    crewListText = `You have ${totalCrews} crew${totalCrews === 1 ? '' : 's'}.\n\n`;
                   }
-                  responseContent += ', \'Create Crew\', or \'exit\'.';
                   
+                  crewsOnPage.forEach((crew, index) => {
+                    crewListText += `${index + 1}. ${crew.name}\n`;
+                  });
+                  
+                  const hasMore = totalCrews > (currentPage + 1) * pageSize;
+                  crewListText += '\n';
+                  if (hasMore) {
+                    crewListText += 'Invalid selection. Reply with a number (1-5), \'More\' to see the next 5';
+                  } else {
+                    crewListText += `Invalid selection. Reply with a number (1-${crewsOnPage.length})`;
+                  }
+                  crewListText += ', \'Create Crew\' to make a new one, or \'exit\'.';
+                  
+                  responseContent = crewListText;
                   shouldSendSMS = true;
                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
                   return new Response(JSON.stringify({
@@ -8636,7 +7730,7 @@ if (is_host === true) {
                  const crewsOnPage = crewList.slice(newPage * pageSize, (newPage + 1) * pageSize);
                  
                  if (crewsOnPage.length === 0) {
-                   responseContent = 'No more crews to show.';
+                   responseContent = 'I didn\'t understand that. Reply with a crew number, \'More\', \'Create Crew\', or \'exit\'.';
                    shouldSendSMS = true;
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
                    return new Response(JSON.stringify({
@@ -8661,43 +7755,34 @@ if (is_host === true) {
                    crewListText += `${index + 1}. ${crew.name}\n`;
                  });
                  
-                const hasMore = totalCrews > (newPage + 1) * pageSize;
-                const hasPrevious = newPage > 0;
-                crewListText += '\n';
-                
-                // Build prompt with conditional pagination
-                if (crewsOnPage.length < pageSize) {
-                  crewListText += `Reply with a number (1-${crewsOnPage.length})`;
-                } else {
-                  crewListText += 'Reply with a number (1-5)';
-                }
-                
-                // Only show pagination actions if available
-                if (hasMore && hasPrevious) {
-                  crewListText += ', \'Next\' or \'N\' for the next 5, \'Prev\' or \'P\' for the previous 5';
-                } else if (hasMore) {
-                  crewListText += ', \'Next\' or \'N\' for the next 5';
-                } else if (hasPrevious) {
-                  crewListText += ', \'Prev\' or \'P\' for the previous 5';
-                }
-                crewListText += ', \'Done\' or \'D\' to return to menu, \'Create Crew\' to make a new one, or \'exit\'.';
-                
-                responseContent = crewListText;
-                shouldSendSMS = true;
-                
-                // Update conversation state with new page
-                await supabase
-                  .from('conversation_state')
-                  .update({
-                    extracted_data: [{
-                      action: 'CHECK_CREW_MEMBERS',
-                      current_page: newPage,
-                      crew_list: crewList,
-                      search_query: searchQuery,
-                      timestamp: new Date().toISOString()
-                    }]
-                  })
-                  .eq('user_id', userId);
+                 const hasMore = totalCrews > (newPage + 1) * pageSize;
+                 crewListText += '\n';
+                 if (hasMore) {
+                   crewListText += 'Reply with a number (1-5), \'More\' to see the next 5';
+                 } else {
+                   crewListText += 'Reply with a number (1-5)';
+                 }
+                 if (newPage > 0) {
+                   crewListText += ', \'Back\' for the previous 5';
+                 }
+                 crewListText += ', \'Create Crew\' to make a new one, or \'exit\'.';
+                 
+                 responseContent = crewListText;
+                 shouldSendSMS = true;
+                 
+                 // Update conversation state with new page
+                 await supabase
+                   .from('conversation_state')
+                   .update({
+                     extracted_data: [{
+                       action: 'CHECK_CREW_MEMBERS',
+                       current_page: newPage,
+                       crew_list: crewList,
+                       search_query: searchQuery,
+                       timestamp: new Date().toISOString()
+                     }]
+                   })
+                   .eq('user_id', userId);
                  
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
                  
@@ -8746,43 +7831,34 @@ if (is_host === true) {
                    crewListText += `${index + 1}. ${crew.name}\n`;
                  });
                  
-                const hasMore = totalCrews > (newPage + 1) * pageSize;
-                const hasPrevious = newPage > 0;
-                crewListText += '\n';
-                
-                // Build prompt with conditional pagination
-                if (crewsOnPage.length < pageSize) {
-                  crewListText += `Reply with a number (1-${crewsOnPage.length})`;
-                } else {
-                  crewListText += 'Reply with a number (1-5)';
-                }
-                
-                // Only show pagination actions if available
-                if (hasMore && hasPrevious) {
-                  crewListText += ', \'Next\' or \'N\' for the next 5, \'Prev\' or \'P\' for the previous 5';
-                } else if (hasMore) {
-                  crewListText += ', \'Next\' or \'N\' for the next 5';
-                } else if (hasPrevious) {
-                  crewListText += ', \'Prev\' or \'P\' for the previous 5';
-                }
-                crewListText += ', \'Done\' or \'D\' to return to menu, \'Create Crew\' to make a new one, or \'exit\'.';
-                
-                responseContent = crewListText;
-                shouldSendSMS = true;
-                
-                // Update conversation state with new page
-                await supabase
-                  .from('conversation_state')
-                  .update({
-                    extracted_data: [{
-                      action: 'CHECK_CREW_MEMBERS',
-                      current_page: newPage,
-                      crew_list: crewList,
-                      search_query: searchQuery,
-                      timestamp: new Date().toISOString()
-                    }]
-                  })
-                  .eq('user_id', userId);
+                 const hasMore = totalCrews > (newPage + 1) * pageSize;
+                 crewListText += '\n';
+                 if (hasMore) {
+                   crewListText += 'Reply with a number (1-5), \'More\' to see the next 5';
+                 } else {
+                   crewListText += 'Reply with a number (1-5)';
+                 }
+                 if (newPage > 0) {
+                   crewListText += ', \'Back\' for the previous 5';
+                 }
+                 crewListText += ', \'Create Crew\' to make a new one, or \'exit\'.';
+                 
+                 responseContent = crewListText;
+                 shouldSendSMS = true;
+                 
+                 // Update conversation state with new page
+                 await supabase
+                   .from('conversation_state')
+                   .update({
+                     extracted_data: [{
+                       action: 'CHECK_CREW_MEMBERS',
+                       current_page: newPage,
+                       crew_list: crewList,
+                       search_query: searchQuery,
+                       timestamp: new Date().toISOString()
+                     }]
+                   })
+                   .eq('user_id', userId);
                  
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
                  
@@ -8848,8 +7924,9 @@ if (is_host === true) {
                  
                  // Validate menu option range (1-9)
                  if (menuOption < 1 || menuOption > 9) {
-                   // Show error message only (don't re-display menu)
-                   responseContent = `I didn't understand that. Reply with a number (1-9), or type 'exit'.`;
+                   // Show menu again with error message
+                   const menuDisplay = await showCrewMembersAndMenu(supabase, userId, phone_number, send_sms, crewId, crewName, phone_number);
+                   responseContent = `Invalid selection.\n${menuDisplay}`;
                    shouldSendSMS = true;
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
                    return new Response(JSON.stringify({
@@ -8919,33 +7996,16 @@ if (is_host === true) {
                      memberList.forEach((member, index) => {
                        memberListText += `${index + 1}. ${member.name}\n`;
                      });
-                     memberListText += '\nReply with numbers (e.g. \'2\' or \'1 3\'), or type \'Done\' or \'D\' to return to menu.';
+                     memberListText += '\nReply with numbers (e.g. \'2\' or \'1 3\'), or type \'Done\' to return to menu.';
                      responseContent = memberListText;
-                  } else {
-                    // Show first 5 with pagination
-                    const pageSize = 5;
-                    const page = 0;
-                    const membersOnPage = memberList.slice(page * pageSize, (page + 1) * pageSize);
-                    const hasMore = memberList.length > (page + 1) * pageSize;
-                    const hasPrevious = page > 0;
-                    
-                    let memberListText = `Who would you like to remove?\n\n`;
-                    membersOnPage.forEach((member, index) => {
-                      memberListText += `${index + 1}. ${member.name}\n`;
-                    });
-                    
-                    memberListText += '\nReply with numbers';
-                    // Only show pagination actions if available
-                    if (hasMore && hasPrevious) {
-                      memberListText += ', \'Next\' or \'N\' for next 5, \'Prev\' or \'P\' for previous 5';
-                    } else if (hasMore) {
-                      memberListText += ', \'Next\' or \'N\' for next 5';
-                    } else if (hasPrevious) {
-                      memberListText += ', \'Prev\' or \'P\' for previous 5';
-                    }
-                    memberListText += ', or type \'Done\' or \'D\' to return to menu.';
-                    responseContent = memberListText;
-                  }
+                   } else {
+                     // Show first 5 with pagination
+                     let memberListText = `Showing first 5. Reply with numbers, \'More\' for next 5, \'Back\' for previous 5, or type \'Done\' to cancel.\n\n`;
+                     memberList.slice(0, 5).forEach((member, index) => {
+                       memberListText += `${index + 1}. ${member.name}\n`;
+                     });
+                     responseContent = memberListText;
+                   }
                    
                    shouldSendSMS = true;
                    await supabase
@@ -9193,768 +8253,21 @@ if (is_host === true) {
                      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
                    });
                  }
-              } catch (error) {
-                console.error('Error in CREW_MANAGEMENT_MENU_SELECTION:', error);
-                responseContent = 'Failed to process menu selection. Please try again.';
-                shouldSendSMS = true;
-                await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                return new Response(JSON.stringify({
-                  success: true,
-                  action: 'CREW_MANAGEMENT_MENU_SELECTION',
-                  response: responseContent,
-                  optimization: 'pattern_matching'
-                }), {
-                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                });
-              }
-            } else if (action === 'EDIT_CONTACT') {
-              console.log('EDIT_CONTACT detected via pattern matching');
-              try {
-                const searchQuery = extractedData?.search_query;
-                
-                // Count user's contacts
-                const { count: contactCount, error: countError } = await supabase
-                  .from('contacts')
-                  .select('id', { count: 'exact', head: true })
-                  .eq('user_id', userId);
-                
-                if (countError) throw countError;
-                
-                // If no contacts
-                if (!contactCount || contactCount === 0) {
-                  responseContent = 'No contacts found. Add people by creating a crew or adding members to an existing crew.';
-                  shouldSendSMS = true;
-                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                  
-                  // Clear conversation state
-                  await supabase
-                    .from('conversation_state')
-                    .update({
-                      waiting_for: null,
-                      current_state: 'normal',
-                      extracted_data: [],
-                      last_action: 'EDIT_CONTACT',
-                      last_action_timestamp: new Date().toISOString()
-                    })
-                    .eq('user_id', userId);
-                  
-                  return new Response(JSON.stringify({
-                    success: true,
-                    action: 'EDIT_CONTACT',
-                    response: responseContent
-                  }), {
-                    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                  });
-                }
-                
-                // If search query provided
-                if (searchQuery) {
-                  const contacts = await searchUserContacts(supabase, userId, searchQuery);
-                  
-                  if (contacts.length === 0) {
-                    responseContent = `No contacts found for '${searchQuery}'. Try another name or type 'exit'.`;
-                    shouldSendSMS = true;
-                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                    
-                    // Keep in search mode
-                    await supabase
-                      .from('conversation_state')
-                      .upsert({
-                        user_id: userId,
-                        phone_number: phone_number,
-                        waiting_for: 'edit_contact_search_input',
-                        current_state: 'edit_contact_search',
-                        extracted_data: [],
-                        last_action: 'EDIT_CONTACT',
-                        last_action_timestamp: new Date().toISOString()
-                      }, { onConflict: 'user_id' });
-                    
-                    return new Response(JSON.stringify({
-                      success: true,
-                      action: 'EDIT_CONTACT',
-                      response: responseContent
-                    }), {
-                      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                    });
-                  }
-                  
-                  // Exactly 1 match - go directly to actions menu
-                  if (contacts.length === 1) {
-                    responseContent = await showContactActionsMenu(supabase, userId, phone_number, send_sms, contacts[0].id, phone_number);
-                    return new Response(JSON.stringify({
-                      success: true,
-                      action: 'EDIT_CONTACT',
-                      response: responseContent
-                    }), {
-                      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                    });
-                  }
-                  
-                  // Multiple matches - show list (up to 5)
-                  const displayContacts = contacts.slice(0, 5);
-                  let contactList = `Found these contacts:\n\n`;
-                  for (let i = 0; i < displayContacts.length; i++) {
-                    const displayText = await formatContactDisplay(displayContacts[i]);
-                    contactList += `${i + 1}. ${displayText}\n`;
-                  }
-                  contactList += `\nReply with a number or type 'exit'.`;
-                  
-                  responseContent = contactList;
-                  shouldSendSMS = true;
-                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                  
-                  // Save search results in state
-                  await supabase
-                    .from('conversation_state')
-                    .upsert({
-                      user_id: userId,
-                      phone_number: phone_number,
-                      waiting_for: 'edit_contact_selection',
-                      current_state: 'edit_contact_list',
-                      extracted_data: [{
-                        action: 'EDIT_CONTACT',
-                        contact_list: displayContacts.map(c => ({
-                          id: c.id,
-                          name: `${c.first_name}${c.last_name ? ' ' + c.last_name : ''}`,
-                          phone: c.phone_number
-                        })),
-                        timestamp: new Date().toISOString()
-                      }]
-                    }, { onConflict: 'user_id' });
-                  
-                  return new Response(JSON.stringify({
-                    success: true,
-                    action: 'EDIT_CONTACT',
-                    response: responseContent
-                  }), {
-                    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                  });
-                }
-                
-                // No search query - prompt for name
-                responseContent = 'Type part or all of the name of the person to edit, or type \'exit\'.';
-                shouldSendSMS = true;
-                await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                
-                await supabase
-                  .from('conversation_state')
-                  .upsert({
-                    user_id: userId,
-                    phone_number: phone_number,
-                    waiting_for: 'edit_contact_search_input',
-                    current_state: 'edit_contact_search',
-                    extracted_data: [],
-                    last_action: 'EDIT_CONTACT',
-                    last_action_timestamp: new Date().toISOString()
-                  }, { onConflict: 'user_id' });
-                
-                return new Response(JSON.stringify({
-                  success: true,
-                  action: 'EDIT_CONTACT',
-                  response: responseContent
-                }), {
-                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                });
-                
-              } catch (error) {
-                console.error('Error in EDIT_CONTACT:', error);
-                responseContent = 'Failed to search contacts. Please try again.';
-                shouldSendSMS = true;
-                await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                return new Response(JSON.stringify({
-                  success: true,
-                  action: 'EDIT_CONTACT',
-                  response: responseContent
-                }), {
-                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                });
-              }
-            } else if (action === 'EDIT_CONTACT_SEARCH' || action === 'EDIT_CONTACT_SELECTION') {
-              console.log(`${action} detected`);
-              try {
-                let contactId = null;
-                
-                if (action === 'EDIT_CONTACT_SEARCH') {
-                  const searchQuery = extractedData?.search_query;
-                  const contacts = await searchUserContacts(supabase, userId, searchQuery);
-                  
-                  if (contacts.length === 0) {
-                    responseContent = `No contacts found for '${searchQuery}'. Try another name or type 'exit'.`;
-                    shouldSendSMS = true;
-                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                    return new Response(JSON.stringify({
-                      success: true,
-                      action: action,
-                      response: responseContent
-                    }), {
-                      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                    });
-                  }
-                  
-                  if (contacts.length === 1) {
-                    contactId = contacts[0].id;
-                  } else {
-                    // Show list
-                    const displayContacts = contacts.slice(0, 5);
-                    let contactList = `Found these contacts:\n\n`;
-                    for (let i = 0; i < displayContacts.length; i++) {
-                      const displayText = await formatContactDisplay(displayContacts[i]);
-                      contactList += `${i + 1}. ${displayText}\n`;
-                    }
-                    contactList += `\nReply with a number or type 'exit'.`;
-                    
-                    responseContent = contactList;
-                    shouldSendSMS = true;
-                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                    
-                    await supabase
-                      .from('conversation_state')
-                      .upsert({
-                        user_id: userId,
-                        phone_number: phone_number,
-                        waiting_for: 'edit_contact_selection',
-                        current_state: 'edit_contact_list',
-                        extracted_data: [{
-                          action: 'EDIT_CONTACT',
-                          contact_list: displayContacts.map(c => ({
-                            id: c.id,
-                            name: `${c.first_name}${c.last_name ? ' ' + c.last_name : ''}`,
-                            phone: c.phone_number
-                          }))
-                        }]
-                      }, { onConflict: 'user_id' });
-                    
-                    return new Response(JSON.stringify({
-                      success: true,
-                      action: action,
-                      response: responseContent
-                    }), {
-                      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                    });
-                  }
-                } else if (action === 'EDIT_CONTACT_SELECTION') {
-                  const contactIndex = extractedData?.contact_index;
-                  const contactList = conversationState?.extracted_data?.[0]?.contact_list || [];
-                  
-                  if (contactIndex < 0 || contactIndex >= contactList.length) {
-                    responseContent = 'I didn\'t understand that. Reply with a number or type \'exit\'.';
-                    shouldSendSMS = true;
-                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                    return new Response(JSON.stringify({
-                      success: true,
-                      action: action,
-                      response: responseContent
-                    }), {
-                      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                    });
-                  }
-                  
-                  contactId = contactList[contactIndex].id;
-                }
-                
-                // Show contact actions menu
-                responseContent = await showContactActionsMenu(supabase, userId, phone_number, send_sms, contactId, phone_number);
-                return new Response(JSON.stringify({
-                  success: true,
-                  action: action,
-                  response: responseContent
-                }), {
-                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                });
-                
-              } catch (error) {
-                console.error(`Error in ${action}:`, error);
-                responseContent = 'Failed to select contact. Please try again.';
-                shouldSendSMS = true;
-                await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                return new Response(JSON.stringify({
-                  success: true,
-                  action: action,
-                  response: responseContent
-                }), {
-                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                });
-              }
-            } else if (action === 'EDIT_CONTACT_MENU_SELECTION') {
-              console.log('EDIT_CONTACT_MENU_SELECTION detected');
-              try {
-                const menuOption = extractedData?.menu_option;
-                const contactData = conversationState?.extracted_data?.[0];
-                const contactId = contactData?.contact_id;
-                const contactName = contactData?.contact_name;
-                const contactPhone = contactData?.contact_phone;
-                
-                if (!contactId) {
-                  responseContent = 'Session expired. Please try \'Edit Contact\' again.';
-                  shouldSendSMS = true;
-                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                  return new Response(JSON.stringify({
-                    success: true,
-                    action: action,
-                    response: responseContent
-                  }), {
-                    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                  });
-                }
-                
-                switch (menuOption) {
-                  case 1: // Edit Name
-                    responseContent = 'Enter the new name for this contact, or type \'exit\'.';
-                    shouldSendSMS = true;
-                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                    
-                    await supabase
-                      .from('conversation_state')
-                      .update({
-                        waiting_for: 'edit_contact_name_input',
-                        current_state: 'edit_contact_name'
-                      })
-                      .eq('user_id', userId);
-                    break;
-                    
-                  case 2: // Edit Phone Number
-                    // Check if editing own phone number
-                    const { data: profile } = await supabase
-                      .from('profiles')
-                      .select('phone_number')
-                      .eq('id', userId)
-                      .single();
-                    
-                    if (profile && profile.phone_number === contactPhone) {
-                      responseContent = 'You cannot edit your own phone number through this feature.';
-                      shouldSendSMS = true;
-                      await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                      
-                      // Re-show menu
-                      responseContent = await showContactActionsMenu(supabase, userId, phone_number, send_sms, contactId, phone_number);
-                      break;
-                    }
-                    
-                    responseContent = 'Enter the new phone number (digits only), or type \'back\' or \'exit\'.';
-                    shouldSendSMS = true;
-                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                    
-                    await supabase
-                      .from('conversation_state')
-                      .update({
-                        waiting_for: 'edit_contact_phone_input',
-                        current_state: 'edit_contact_phone'
-                      })
-                      .eq('user_id', userId);
-                    break;
-                    
-                  case 3: // Delete Contact
-                    responseContent = `Delete ${contactName} — (${formatPhoneNumberForDisplay(contactPhone)}) from all crews and events? Type 'delete' to confirm or 'back' to cancel.`;
-                    shouldSendSMS = true;
-                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                    
-                    await supabase
-                      .from('conversation_state')
-                      .update({
-                        waiting_for: 'edit_contact_delete_confirmation',
-                        current_state: 'edit_contact_delete'
-                      })
-                      .eq('user_id', userId);
-                    break;
-                    
-                  case 4: // Exit
-                    responseContent = 'Exited contact editing.';
-                    shouldSendSMS = true;
-                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                    
-                    await supabase
-                      .from('conversation_state')
-                      .update({
-                        waiting_for: null,
-                        current_state: 'normal',
-                        extracted_data: [],
-                        last_action: 'EDIT_CONTACT',
-                        last_action_timestamp: new Date().toISOString()
-                      })
-                      .eq('user_id', userId);
-                    break;
-                    
-                  default:
-                    responseContent = 'I didn\'t understand that. Reply with a number (1-4), or type \'exit\'.';
-                    shouldSendSMS = true;
-                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                }
-                
-                return new Response(JSON.stringify({
-                  success: true,
-                  action: action,
-                  response: responseContent
-                }), {
-                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                });
-                
-              } catch (error) {
-                console.error('Error in EDIT_CONTACT_MENU_SELECTION:', error);
-                responseContent = 'Failed to process selection. Please try again.';
-                shouldSendSMS = true;
-                await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                return new Response(JSON.stringify({
-                  success: true,
-                  action: action,
-                  response: responseContent
-                }), {
-                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                });
-              }
-            } else if (action === 'EDIT_CONTACT_MENU_INVALID_SELECTION') {
-              console.log('EDIT_CONTACT_MENU_INVALID_SELECTION detected via pattern matching');
-              
-              responseContent = `I didn't understand that. Reply with a number (1-4), or type 'exit'.`;
-              shouldSendSMS = true;
-              
-              // Keep state in edit_contact_actions_menu
-              await supabase
-                .from('conversation_state')
-                .update({
-                  waiting_for: 'edit_contact_actions_menu',
-                  current_state: 'edit_contact_menu'
-                })
-                .eq('user_id', userId);
-              
-              await sendSMS(phone_number, responseContent, send_sms, phone_number);
-              return new Response(JSON.stringify({
-                success: true,
-                action: 'EDIT_CONTACT_MENU_INVALID_SELECTION',
-                response: responseContent,
-                optimization: 'pattern_matching'
-              }), {
-                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-              });
-            } else if (action === 'EDIT_CONTACT_NAME_INPUT_INVALID') {
-              console.log('EDIT_CONTACT_NAME_INPUT_INVALID detected via pattern matching');
-              
-              responseContent = `I didn't understand that. Enter a new name or type 'exit'.`;
-              shouldSendSMS = true;
-              
-              // Keep state in edit_contact_name_input
-              await supabase
-                .from('conversation_state')
-                .update({
-                  waiting_for: 'edit_contact_name_input',
-                  current_state: 'edit_contact_name'
-                })
-                .eq('user_id', userId);
-              
-              await sendSMS(phone_number, responseContent, send_sms, phone_number);
-              return new Response(JSON.stringify({
-                success: true,
-                action: 'EDIT_CONTACT_NAME_INPUT_INVALID',
-                response: responseContent,
-                optimization: 'pattern_matching'
-              }), {
-                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-              });
-            } else if (action === 'EDIT_CONTACT_NAME_INPUT') {
-              console.log('EDIT_CONTACT_NAME_INPUT detected');
-              try {
-                const newName = extractedData?.new_name;
-                const contactData = conversationState?.extracted_data?.[0];
-                const contactId = contactData?.contact_id;
-                
-                if (!newName || newName.length === 0) {
-                  responseContent = 'I didn\'t understand that. Enter a new name or type \'exit\'.';
-                  shouldSendSMS = true;
-                  
-                  // Preserve state
-                  await supabase
-                    .from('conversation_state')
-                    .update({
-                      waiting_for: 'edit_contact_name_input',
-                      current_state: 'edit_contact_name'
-                    })
-                    .eq('user_id', userId);
-                  
-                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                  return new Response(JSON.stringify({
-                    success: true,
-                    action: action,
-                    response: responseContent
-                  }), {
-                    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                  });
-                }
-                
-                // Parse name into first and last
-                const nameParts = newName.split(' ');
-                const firstName = nameParts[0];
-                const lastName = nameParts.slice(1).join(' ') || '';
-                
-                // Update contact name
-                const { error: updateError } = await supabase
-                  .from('contacts')
-                  .update({
-                    first_name: firstName,
-                    last_name: lastName
-                  })
-                  .eq('id', contactId)
-                  .eq('user_id', userId);
-                
-                if (updateError) throw updateError;
-                
-                responseContent = `Updated contact name to ${firstName}${lastName ? ' ' + lastName : ''}.`;
-                shouldSendSMS = true;
-                await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                
-                // Re-show contact and menu
-                responseContent = await showContactActionsMenu(supabase, userId, phone_number, send_sms, contactId, phone_number);
-                
-                return new Response(JSON.stringify({
-                  success: true,
-                  action: action,
-                  response: responseContent
-                }), {
-                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                });
-                
-              } catch (error) {
-                console.error('Error in EDIT_CONTACT_NAME_INPUT:', error);
-                responseContent = 'Failed to update name. Please try again.';
-                shouldSendSMS = true;
-                await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                return new Response(JSON.stringify({
-                  success: true,
-                  action: action,
-                  response: responseContent
-                }), {
-                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                });
-              }
-            } else if (action === 'EDIT_CONTACT_PHONE_INPUT') {
-              console.log('EDIT_CONTACT_PHONE_INPUT detected');
-              try {
-                const newPhone = extractedData?.new_phone;
-                const contactData = conversationState?.extracted_data?.[0];
-                const contactId = contactData?.contact_id;
-                
-                // Validate phone format (must be 10 digits)
-                if (!newPhone || newPhone.length !== 10) {
-                  responseContent = 'I didn\'t understand that. Enter a 10-digit phone number, or type \'back\' or \'exit\'.';
-                  shouldSendSMS = true;
-                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                  return new Response(JSON.stringify({
-                    success: true,
-                    action: action,
-                    response: responseContent
-                  }), {
-                    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                  });
-                }
-                
-                // Format as +1XXXXXXXXXX
-                const formattedPhone = `+1${newPhone}`;
-                
-                // Check if phone belongs to another contact
-                const { data: existingContact } = await supabase
-                  .from('contacts')
-                  .select('id')
-                  .eq('user_id', userId)
-                  .eq('phone_number', formattedPhone)
-                  .neq('id', contactId)
-                  .maybeSingle();
-                
-                if (existingContact) {
-                  responseContent = 'That number is already used by another contact. Enter a different number, or type \'Done\' or \'exit\'.';
-                  shouldSendSMS = true;
-                  
-                  // Explicitly preserve state in edit_contact_phone_input
-                  await supabase
-                    .from('conversation_state')
-                    .update({
-                      waiting_for: 'edit_contact_phone_input',
-                      current_state: 'edit_contact_phone'
-                    })
-                    .eq('user_id', userId);
-                  
-                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                  return new Response(JSON.stringify({
-                    success: true,
-                    action: action,
-                    response: responseContent
-                  }), {
-                    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                  });
-                }
-                
-                // Update phone number
-                const { error: updateError } = await supabase
-                  .from('contacts')
-                  .update({
-                    phone_number: formattedPhone
-                  })
-                  .eq('id', contactId)
-                  .eq('user_id', userId);
-                
-                if (updateError) throw updateError;
-                
-                responseContent = `Updated phone number to (${formatPhoneNumberForDisplay(formattedPhone)}).`;
-                shouldSendSMS = true;
-                await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                
-                // Re-show contact and menu
-                responseContent = await showContactActionsMenu(supabase, userId, phone_number, send_sms, contactId, phone_number);
-                
-                return new Response(JSON.stringify({
-                  success: true,
-                  action: action,
-                  response: responseContent
-                }), {
-                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                });
-                
-              } catch (error) {
-                console.error('Error in EDIT_CONTACT_PHONE_INPUT:', error);
-                responseContent = 'Failed to update phone number. Please try again.';
-                shouldSendSMS = true;
-                await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                return new Response(JSON.stringify({
-                  success: true,
-                  action: action,
-                  response: responseContent
-                }), {
-                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                });
-              }
-            } else if (action === 'EDIT_CONTACT_BACK_TO_MENU') {
-              console.log('EDIT_CONTACT_BACK_TO_MENU detected');
-              const contactData = conversationState?.extracted_data?.[0];
-              const contactId = contactData?.contact_id;
-              
-              responseContent = await showContactActionsMenu(supabase, userId, phone_number, send_sms, contactId, phone_number);
-              
-              return new Response(JSON.stringify({
-                success: true,
-                action: action,
-                response: responseContent
-              }), {
-                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-              });
-            } else if (action === 'EDIT_CONTACT_DELETE_INVALID') {
-              console.log('EDIT_CONTACT_DELETE_INVALID detected');
-              responseContent = `I didn't understand that. Type 'delete' to confirm or 'Done'.`;
-              shouldSendSMS = true;
-              await sendSMS(phone_number, responseContent, send_sms, phone_number);
-              
-              // Preserve the delete confirmation state
-              await supabase
-                .from('conversation_state')
-                .update({
-                  waiting_for: 'edit_contact_delete_confirmation',
-                  current_state: 'edit_contact_delete'
-                })
-                .eq('user_id', userId);
-              
-              return new Response(JSON.stringify({
-                success: true,
-                action: action,
-                response: responseContent
-              }), {
-                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-              });
-            } else if (action === 'EDIT_CONTACT_DELETE_CONFIRMED') {
-              console.log('EDIT_CONTACT_DELETE_CONFIRMED detected');
-              try {
-                const contactData = conversationState?.extracted_data?.[0];
-                const contactId = contactData?.contact_id;
-                const contactName = contactData?.contact_name;
-                const contactPhone = contactData?.contact_phone;
-                
-                // Verify contact belongs to current user before deletion
-                const { data: contactOwnershipData, error: contactCheckError } = await supabase
-                  .from('contacts')
-                  .select('id, user_id')
-                  .eq('id', contactId)
-                  .eq('user_id', userId)
-                  .single();
-
-                if (contactCheckError || !contactOwnershipData) {
-                  responseContent = 'Contact not found or you don\'t have permission to delete it.';
-                  shouldSendSMS = true;
-                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                  // Clear conversation state
-                  await supabase
-                    .from('conversation_state')
-                    .update({
-                      waiting_for: null,
-                      current_state: 'normal',
-                      extracted_data: [],
-                      last_action: 'EDIT_CONTACT',
-                      last_action_timestamp: new Date().toISOString()
-                    })
-                    .eq('user_id', userId);
-                  
-                  return new Response(JSON.stringify({
-                    success: false,
-                    action: action,
-                    response: responseContent
-                  }), {
-                    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                  });
-                }
-                
-                // Delete from crew_members (cascade)
-                await supabase
-                  .from('crew_members')
-                  .delete()
-                  .eq('contact_id', contactId);
-                
-                // Delete from invitations (cascade)
-                await supabase
-                  .from('invitations')
-                  .delete()
-                  .eq('contact_id', contactId);
-                
-                // Delete contact
-                const { error: deleteError } = await supabase
-                  .from('contacts')
-                  .delete()
-                  .eq('id', contactId)
-                  .eq('user_id', userId);
-                
-                if (deleteError) throw deleteError;
-                
-                responseContent = `Deleted ${contactName} — (${formatPhoneNumberForDisplay(contactPhone)}) from all crews and events.`;
-                shouldSendSMS = true;
-                await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                
-                // Clear conversation state
-                await supabase
-                  .from('conversation_state')
-                  .update({
-                    waiting_for: null,
-                    current_state: 'normal',
-                    extracted_data: [],
-                    last_action: 'EDIT_CONTACT',
-                    last_action_timestamp: new Date().toISOString()
-                  })
-                  .eq('user_id', userId);
-                
-                return new Response(JSON.stringify({
-                  success: true,
-                  action: action,
-                  response: responseContent
-                }), {
-                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                });
-                
-              } catch (error) {
-                console.error('Error in EDIT_CONTACT_DELETE_CONFIRMED:', error);
-                responseContent = 'Failed to delete contact. Please try again.';
-                shouldSendSMS = true;
-                await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                return new Response(JSON.stringify({
-                  success: true,
-                  action: action,
-                  response: responseContent
-                }), {
-                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                });
-              }
-            } else if (action === 'REMOVE_MEMBERS_SELECTION') {
+               } catch (error) {
+                 console.error('Error in CREW_MANAGEMENT_MENU_SELECTION:', error);
+                 responseContent = 'Failed to process menu selection. Please try again.';
+                 shouldSendSMS = true;
+                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                 return new Response(JSON.stringify({
+                   success: true,
+                   action: 'CREW_MANAGEMENT_MENU_SELECTION',
+                   response: responseContent,
+                   optimization: 'pattern_matching'
+                 }), {
+                   headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                 });
+               }
+             } else if (action === 'REMOVE_MEMBERS_SELECTION') {
                  console.log('REMOVE_MEMBERS_SELECTION detected via pattern matching');
                  try {
                    const memberIndices = extractedData?.member_indices || [];
@@ -9964,7 +8277,7 @@ if (is_host === true) {
                    const memberList = crewData?.member_list || [];
                  
                  if (!crewId || !crewName || memberIndices.length === 0) {
-                   responseContent = 'I didn\'t understand that. Reply with numbers, \'Next\' or \'N\', \'Prev\' or \'P\', or \'Done\' or \'D\'.';
+                   responseContent = 'I didn\'t understand that. Reply with numbers, \'More\', \'Back\', or \'Done\'.';
                    shouldSendSMS = true;
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
                    return new Response(JSON.stringify({
@@ -9998,7 +8311,7 @@ if (is_host === true) {
                  const membersToRemove = validIndices.map(idx => memberList[idx]).filter(m => m);
                  
                  if (membersToRemove.length === 0) {
-                   responseContent = 'I didn\'t understand that. Reply with numbers, \'Next\' or \'N\', \'Prev\' or \'P\', or \'Done\' or \'D\'.';
+                   responseContent = 'I didn\'t understand that. Reply with numbers, \'More\', \'Back\', or \'Done\'.';
                    shouldSendSMS = true;
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
                    return new Response(JSON.stringify({
@@ -10076,23 +8389,8 @@ if (is_host === true) {
                  let memberPage = crewData?.member_page || 0;
                  const pageSize = 5;
                  
-                 // Handle pagination (both "prev" and "next" are now for navigation)
+                 // Handle pagination (both "back" and "more" are now for navigation)
                  if (currentAction === 'REMOVE_MEMBERS_BACK') {
-                   // If on first page, return to menu; otherwise paginate back
-                   if (memberPage === 0) {
-                     // Return to menu
-                     responseContent = await showCrewMembersAndMenu(supabase, userId, phone_number, send_sms, crewId, crewName, phone_number);
-                     shouldSendSMS = true;
-                     await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                     return new Response(JSON.stringify({
-                       success: true,
-                       action: 'CREW_CHECK_DONE',
-                       response: responseContent,
-                       optimization: 'pattern_matching'
-                     }), {
-                       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                     });
-                   }
                    // Paginate back (go to previous page)
                    memberPage = Math.max(0, memberPage - 1);
                  } else if (currentAction === 'REMOVE_MEMBERS_MORE') {
@@ -10100,26 +8398,15 @@ if (is_host === true) {
                    memberPage += 1;
                  }
                  
-                const membersOnPage = memberList.slice(memberPage * pageSize, (memberPage + 1) * pageSize);
-                const hasMore = memberList.length > (memberPage + 1) * pageSize;
-                const hasPrevious = memberPage > 0;
-                
-                if (membersOnPage.length === 0) {
-                  responseContent = 'I didn\'t understand that. Reply with numbers';
-                  // Only show pagination actions if available
-                  if (hasMore && hasPrevious) {
-                    responseContent += ', \'Next\' or \'N\', \'Prev\' or \'P\'';
-                  } else if (hasMore) {
-                    responseContent += ', \'Next\' or \'N\'';
-                  } else if (hasPrevious) {
-                    responseContent += ', \'Prev\' or \'P\'';
-                  }
-                  responseContent += ', or \'Done\' or \'D\'.';
-                  shouldSendSMS = true;
-                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                  return new Response(JSON.stringify({
-                    success: true,
-                    action: currentAction,
+                 const membersOnPage = memberList.slice(memberPage * pageSize, (memberPage + 1) * pageSize);
+                 
+                 if (membersOnPage.length === 0) {
+                   responseContent = 'I didn\'t understand that. Reply with numbers, \'More\', \'Back\', or \'Done\'.';
+                   shouldSendSMS = true;
+                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                   return new Response(JSON.stringify({
+                     success: true,
+                     action: currentAction,
                      response: responseContent,
                      optimization: 'pattern_matching'
                    }), {
@@ -10127,22 +8414,14 @@ if (is_host === true) {
                    });
                  }
                  
-                let memberListText = `Who would you like to remove?\n\n`;
-                
-                membersOnPage.forEach((member, index) => {
-                  memberListText += `${index + 1}. ${member.name}\n`;
-                });
-                
-                memberListText += '\nReply with numbers';
-                // Only show pagination actions if available
-                if (hasMore && hasPrevious) {
-                  memberListText += ', \'Next\' or \'N\' for next 5, \'Prev\' or \'P\' for previous 5';
-                } else if (hasMore) {
-                  memberListText += ', \'Next\' or \'N\' for next 5';
-                } else if (hasPrevious) {
-                  memberListText += ', \'Prev\' or \'P\' for previous 5';
-                }
-                memberListText += ', or type \'Done\' or \'D\' to return to menu.';
+                 let memberListText = `Showing page ${memberPage + 1}. Reply with numbers, `;
+                 if (memberList.length > (memberPage + 1) * pageSize) {
+                   memberListText += '\'More\' for next 5, ';
+                 }
+                 if (memberPage > 0) {
+                   memberListText += '\'Back\' for previous 5, ';
+                 }
+                 memberListText += 'or type \'Done\' to return to menu.\n\n';
                  
                  membersOnPage.forEach((member, index) => {
                    memberListText += `${index + 1}. ${member.name}\n`;
@@ -10190,19 +8469,6 @@ if (is_host === true) {
                    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
                  });
                }
-             } else if (action === 'RENAME_CREW_INPUT_INVALID') {
-               console.log('RENAME_CREW_INPUT_INVALID detected via pattern matching');
-               responseContent = 'I didn\'t understand that. Type a new name or \'Done\'.';
-               shouldSendSMS = true;
-               await sendSMS(phone_number, responseContent, send_sms, phone_number);
-               return new Response(JSON.stringify({
-                 success: true,
-                 action: 'RENAME_CREW_INPUT_INVALID',
-                 response: responseContent,
-                 optimization: 'pattern_matching'
-               }), {
-                 headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-               });
              } else if (action === 'RENAME_CREW_INPUT') {
                console.log('RENAME_CREW_INPUT detected via pattern matching');
                try {
@@ -10212,7 +8478,7 @@ if (is_host === true) {
                  const oldCrewName = crewData?.crew_name;
                  
                  if (!crewId || !oldCrewName || !newCrewName || newCrewName.length < 2 || newCrewName.length > 50) {
-                   responseContent = 'I didn\'t understand that. Type a new name or \'Done\'.';
+                   responseContent = 'I didn\'t understand that. Type a new name (2-50 characters) or \'back\'.';
                    shouldSendSMS = true;
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
                    return new Response(JSON.stringify({
@@ -10243,11 +8509,11 @@ if (is_host === true) {
                  
                  // Check if name is the same
                  if (newCrewName.toLowerCase() === oldCrewName.toLowerCase()) {
-                   // Re-show menu with "Name unchanged." message
-                   const menuDisplay = await showCrewMembersAndMenu(supabase, userId, phone_number, send_sms, crewId, oldCrewName, phone_number);
-                   responseContent = 'Name unchanged.\n\n' + menuDisplay;
+                   responseContent = 'Name unchanged.';
                    shouldSendSMS = true;
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                   // Re-show menu
+                   responseContent = await showCrewMembersAndMenu(supabase, userId, phone_number, send_sms, crewId, oldCrewName, phone_number);
                    return new Response(JSON.stringify({
                      success: true,
                      action: 'RENAME_CREW_INPUT',
@@ -10317,24 +8583,9 @@ if (is_host === true) {
                  const crewId = crewData?.crew_id;
                  const crewName = crewData?.crew_name;
                  
-                 // Check if we're in crew selection (no crew_id) or in crew management menu (has crew_id)
                  if (!crewId || !crewName) {
-                   // Called from crew selection list - exit to normal state
-                   responseContent = 'What would you like to do next?';
+                   responseContent = 'I didn\'t understand that. Please try again.';
                    shouldSendSMS = true;
-                   
-                   // Clear conversation state to return to normal
-                   await supabase
-                     .from('conversation_state')
-                     .update({
-                       waiting_for: null,
-                       current_state: 'normal',
-                       extracted_data: [],
-                       last_action: 'CREW_CHECK_DONE',
-                       last_action_timestamp: new Date().toISOString()
-                     })
-                     .eq('user_id', userId);
-                   
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
                    return new Response(JSON.stringify({
                      success: true,
@@ -10346,7 +8597,7 @@ if (is_host === true) {
                    });
                  }
                  
-                 // Return to crew management menu
+                 // Return to menu
                  responseContent = await showCrewMembersAndMenu(supabase, userId, phone_number, send_sms, crewId, crewName, phone_number);
                  
                  return new Response(JSON.stringify({
@@ -10460,34 +8711,6 @@ if (is_host === true) {
                  return new Response(JSON.stringify({
                    success: true,
                    action: 'DELETE_CREW_CONFIRM',
-                   response: responseContent,
-                   optimization: 'pattern_matching'
-                 }), {
-                   headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                 });
-               }
-             } else if (action === 'DELETE_CREW_INVALID_INPUT') {
-               console.log('DELETE_CREW_INVALID_INPUT detected via pattern matching');
-               try {
-                 responseContent = 'I didn\'t understand that. Type \'delete\' to confirm or \'done\'.';
-                 shouldSendSMS = true;
-                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                 return new Response(JSON.stringify({
-                   success: true,
-                   action: 'DELETE_CREW_INVALID_INPUT',
-                   response: responseContent,
-                   optimization: 'pattern_matching'
-                 }), {
-                   headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                 });
-               } catch (error) {
-                 console.error('Error in DELETE_CREW_INVALID_INPUT:', error);
-                 responseContent = 'Failed to process input. Please try again.';
-                 shouldSendSMS = true;
-                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                 return new Response(JSON.stringify({
-                   success: true,
-                   action: 'DELETE_CREW_INVALID_INPUT',
                    response: responseContent,
                    optimization: 'pattern_matching'
                  }), {
@@ -17536,7 +15759,7 @@ Reply with a command or contact support@funlet.ai with any questions.`;
               
               // Add members immediately (no confirmation) - add to existing crew
               const addedMembers = [];
-              const skippedMembers = []; // Store objects with name and phone for formatting
+              const skippedMembers = []; // NEW
               for (const member of members) {
                 // Check if contact already exists
                 const { data: existingContact } = await supabase
@@ -17625,8 +15848,7 @@ Reply with a command or contact support@funlet.ai with any questions.`;
                 
                 if (existingMember) {
                   console.log(`Contact ${member.name} is already a member of this crew, skipping...`);
-                  // Store both name and phone for formatted display
-                  skippedMembers.push({ name: member.name, phone: member.phone });
+                  skippedMembers.push(member.name); // NEW
                   continue;
                 }
                 
@@ -17650,23 +15872,15 @@ Reply with a command or contact support@funlet.ai with any questions.`;
               
               if (addedMembers.length > 0 && skippedMembers.length > 0) {
                 // Mixed: some added, some skipped
-                const skippedFormatted = skippedMembers.map(m => {
-                  const formattedPhone = formatPhoneNumberForCrewMessage(m.phone);
-                  return `${m.name} (${formattedPhone})`;
-                }).join(', ');
-                responseContent = `Added ${addedMembers.join(', ')} to ${crewName}. ${skippedFormatted} ${skippedMembers.length === 1 ? 'is' : 'are'} already in ${crewName}.\n\nTo add more members:\n\nType a name already in Funlet: Mike\nType a name and number for a new crew member: Mike 4155551234\nShare link for people to add themselves: ${joinLink}\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
+                responseContent = `Added ${addedMembers.join(', ')} to ${crewName}. ${skippedMembers.join(', ')} ${skippedMembers.length === 1 ? 'is' : 'are'} already in the crew.\n\nTo add more members:\n\nType a name already in Funlet: Mike\nType a name and number for a new crew member: Mike 4155551234\nShare link for people to add themselves: ${joinLink}\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
                 shouldSendSMS = true;
               } else if (addedMembers.length > 0) {
                 // All added successfully
                 responseContent = `Added ${addedMembers.join(', ')} to ${crewName}.\n\nTo add more members:\n\nType a name already in Funlet: Mike\nType a name and number for a new crew member: Mike 4155551234\nShare link for people to add themselves: ${joinLink}\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
                 shouldSendSMS = true;
               } else if (skippedMembers.length > 0) {
-                // All were already members - format with phone numbers
-                const skippedFormatted = skippedMembers.map(m => {
-                  const formattedPhone = formatPhoneNumberForCrewMessage(m.phone);
-                  return `${m.name} (${formattedPhone})`;
-                }).join(', ');
-                responseContent = `${skippedFormatted} ${skippedMembers.length === 1 ? 'is' : 'are'} already in ${crewName}.\n\nTo add more members:\n\nType a name already in Funlet: Mike\nType a name and number for a new crew member: Mike 4155551234\nShare link for people to add themselves: ${joinLink}\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
+                // All were already members
+                responseContent = `${skippedMembers.join(', ')} ${skippedMembers.length === 1 ? 'is' : 'are'} already in ${crewName}.\n\nTo add more members:\n\nType a name already in Funlet: Mike\nType a name and number for a new crew member: Mike 4155551234\nShare link for people to add themselves: ${joinLink}\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
                 shouldSendSMS = true;
               } else {
                 // Failed to parse or process any members
@@ -17798,24 +16012,7 @@ Reply with a command or contact support@funlet.ai with any questions.`;
         try {
           const searchName = extractedData.search_name;
           if (!searchName) {
-            // Get crew info from conversation state to include join link
-            let crewId = null;
-            if (conversationState?.extracted_data && Array.isArray(conversationState.extracted_data)) {
-              for (let i = conversationState.extracted_data.length - 1; i >= 0; i--) {
-                const item = conversationState.extracted_data[i];
-                if (item.action === 'CREW_SELECTED' || (item.executed_data && item.executed_data.action === 'CREW_CREATED')) {
-                  crewId = item.crew_id || item.executed_data?.crew_id;
-                  break;
-                }
-              }
-            }
-            
-            if (crewId) {
-              const joinLink = await getCrewJoinLink(supabase, crewId);
-              responseContent = `I didn't understand that. Add members by:\n- Name already in Funlet: Tom\n- Name and number for a new crew member: Tom 4155551234\nShare link for people to add themselves: ${joinLink}\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
-            } else {
-              responseContent = `I didn't understand that. Add members by:\n- Name already in Funlet: Tom\n- Name and number for a new crew member: Tom 4155551234\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
-            }
+            responseContent = `I didn't understand that. Add members by:\n- Name already in Funlet: Tom\n- Name and number for a new crew member: Tom 4155551234`;
             shouldSendSMS = true;
             await sendSMS(phone_number, responseContent, send_sms, phone_number);
             return new Response(JSON.stringify({
@@ -18121,17 +16318,8 @@ Reply with a command or contact support@funlet.ai with any questions.`;
             .single();
           
           if (existingMember) {
-            // Get contact's phone number for display
-            const { data: contactData } = await supabase
-              .from('contacts')
-              .select('phone_number')
-              .eq('id', contactId)
-              .eq('user_id', userId)
-              .single();
-            
-            const formattedPhone = contactData?.phone_number ? formatPhoneNumberForCrewMessage(contactData.phone_number) : '';
             const joinLink = await getCrewJoinLink(supabase, crewId);
-            responseContent = `${contactName}${formattedPhone ? ` (${formattedPhone})` : ''} is already in ${crewName}.\n\nTo add more members:\n\nType a name already in Funlet: Mike\nType a name and number for a new crew member: Mike 4155551234\nShare link for people to add themselves: ${joinLink}\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
+            responseContent = `${contactName} is already in ${crewName}.\n\nTo add more members:\n\nType a name already in Funlet: Mike\nType a name and number for a new crew member: Mike 4155551234\nShare link for people to add themselves: ${joinLink}\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
             shouldSendSMS = true;
             
             // Reset to add-members flow
@@ -18293,30 +16481,19 @@ Reply with a command or contact support@funlet.ai with any questions.`;
             if (crewId) {
               const joinLink = await getCrewJoinLink(supabase, crewId);
               responseContent = `I didn't understand that. Add members by:\n- Name already in Funlet: Tom\n- Name and number for a new crew member: Tom 4155551234\nShare link for people to add themselves: ${joinLink}\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
-              shouldSendSMS = true;
-              await sendSMS(phone_number, responseContent, send_sms, phone_number);
-              return new Response(JSON.stringify({
-                success: true,
-                action: 'CONTACT_SEARCH_SELECTION',
-                response: responseContent,
-                optimization: 'pattern_matching'
-              }), {
-                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-              });
             } else {
-              // Contact list not found - return INVALID_MEMBER_ADDING_MODE action
               responseContent = 'Contact list not found. Please try searching again.';
-              shouldSendSMS = true;
-              await sendSMS(phone_number, responseContent, send_sms, phone_number);
-              return new Response(JSON.stringify({
-                success: true,
-                action: 'INVALID_MEMBER_ADDING_MODE',
-                response: responseContent,
-                optimization: 'pattern_matching'
-              }), {
-                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-              });
             }
+            shouldSendSMS = true;
+            await sendSMS(phone_number, responseContent, send_sms, phone_number);
+            return new Response(JSON.stringify({
+              success: true,
+              action: 'CONTACT_SEARCH_SELECTION',
+              response: responseContent,
+              optimization: 'pattern_matching'
+            }), {
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
           }
           
           const selectedContact = contacts[selectionNumber - 1];
@@ -18420,41 +16597,6 @@ Reply with a command or contact support@funlet.ai with any questions.`;
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
         }
-      } else if (action === 'INVALID_MEMBER_ADDING_MODE') {
-        console.log('INVALID_MEMBER_ADDING_MODE detected via pattern matching, bypassing AI');
-        
-        // Get crew info from conversation state
-        let crewId = null;
-        let crewName = null;
-        
-        if (conversationState?.extracted_data && Array.isArray(conversationState.extracted_data)) {
-          for (let i = conversationState.extracted_data.length - 1; i >= 0; i--) {
-            const item = conversationState.extracted_data[i];
-            if (item.action === 'CREW_SELECTED' || (item.executed_data && item.executed_data.action === 'CREW_CREATED')) {
-              crewId = item.crew_id || item.executed_data?.crew_id;
-              crewName = item.crew_name || item.executed_data?.crew_name;
-              break;
-            }
-          }
-        }
-        
-        if (crewId) {
-          const joinLink = await getCrewJoinLink(supabase, crewId);
-          responseContent = `I didn't understand that. Add members by:\n- Name already in Funlet: Tom\n- Name and number for a new crew member: Tom 4155551234\nShare link for people to add themselves: ${joinLink}\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
-        } else {
-          responseContent = `I didn't understand that. Add members like this: Tom 4155551234. You can also type 'Create Event', 'Sync Up' or 'exit' to do something else.`;
-        }
-        shouldSendSMS = true;
-        await sendSMS(phone_number, responseContent, send_sms, phone_number);
-        
-        return new Response(JSON.stringify({
-          success: true,
-          action: 'INVALID_MEMBER_ADDING_MODE',
-          response: responseContent,
-          optimization: 'pattern_matching'
-        }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
       }
     }
     
@@ -19208,98 +17350,9 @@ Reply with a command or contact support@funlet.ai with any questions.`;
         
         responseContent = `I didn't understand that. Type 'Add Members' to add people to ${crewName}, 'Create Event' to send invitations, or 'exit' to do something else.`;
         shouldSendSMS = true;
-      } else if (conversationState?.waiting_for === 'crew_management_menu') {
-        console.log('User is in crew_management_menu, providing menu selection guidance');
-        
-        responseContent = `I didn't understand that. Reply with a number (1-9), or type 'exit'.`;
-        shouldSendSMS = true;
-        await sendSMS(phone_number, responseContent, send_sms, phone_number);
-        return new Response(JSON.stringify({
-          success: true,
-          action: 'INVALID',
-          response: responseContent,
-          optimization: 'pattern_matching'
-        }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
-      } else if (conversationState?.waiting_for === 'crew_selection_manage') {
-        console.log('User is in crew_selection_manage, providing crew selection guidance');
-        
-        // Check if pagination is available by looking at extracted_data
-        let hasPagination = false;
-        let hasMore = false;
-        let hasPrevious = false;
-        const pageSize = 5;
-        
-        if (conversationState?.extracted_data && Array.isArray(conversationState.extracted_data)) {
-          for (let i = conversationState.extracted_data.length - 1; i >= 0; i--) {
-            const item = conversationState.extracted_data[i];
-            if (item.action === 'CHECK_CREW_MEMBERS' && item.crew_list) {
-              const totalCrews = item.crew_list.length;
-              const currentPage = item.current_page || 0;
-              
-              hasMore = totalCrews > (currentPage + 1) * pageSize;
-              hasPrevious = currentPage > 0;
-              hasPagination = hasMore || hasPrevious;
-              break;
-            }
-          }
-        }
-        
-        // Build error message with conditional pagination options
-        let errorMsg = `I didn't understand that. Reply with a crew number`;
-        if (hasPagination) {
-          if (hasMore && hasPrevious) {
-            errorMsg += `, 'Next' or 'N', 'Prev' or 'P'`;
-          } else if (hasMore) {
-            errorMsg += `, 'Next' or 'N'`;
-          } else if (hasPrevious) {
-            errorMsg += `, 'Prev' or 'P'`;
-          }
-        }
-        errorMsg += `, 'Done' or 'D', 'Create Crew', or 'exit'.`;
-        
-        responseContent = errorMsg;
-        shouldSendSMS = true;
-        await sendSMS(phone_number, responseContent, send_sms, phone_number);
-        return new Response(JSON.stringify({
-          success: true,
-          action: 'INVALID',
-          response: responseContent,
-          optimization: 'pattern_matching'
-        }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
-      } else if (conversationState?.waiting_for === 'event_management_menu') {
-        console.log('User is in event_management_menu, providing menu selection guidance');
-        
-        responseContent = `I didn't understand that. Reply with a number (1–5), or type 'exit'.`;
-        shouldSendSMS = true;
-        await sendSMS(phone_number, responseContent, send_sms, phone_number);
-        return new Response(JSON.stringify({
-          success: true,
-          action: 'INVALID_UNCLEAR_COMMAND',
-          response: responseContent,
-          optimization: 'pattern_matching'
-        }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
-      } else if (conversationState?.waiting_for === 'manage_event_selection') {
-        console.log('User is in manage_event_selection, providing event selection guidance');
-        
-        responseContent = `I didn't understand that. Reply with a number (1–5), 'Next' or 'N', 'Prev' or 'P', 'Done' or 'D', or 'exit'.`;
-        shouldSendSMS = true;
-        await sendSMS(phone_number, responseContent, send_sms, phone_number);
-        return new Response(JSON.stringify({
-          success: true,
-          action: 'INVALID_UNCLEAR_COMMAND',
-          response: responseContent,
-          optimization: 'pattern_matching'
-        }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
-      } else {
-        // Handle INVALID action with subtype detection
+      }
+      // Handle INVALID action with subtype detection
+     else {
       console.log('Processing INVALID action - analyzing subtype for appropriate response');
       
       const invalidSubtype = (extractedParams.invalid_subtype || 'unknown').toLowerCase();
@@ -19435,18 +17488,6 @@ Reply with a command or contact support@funlet.ai with any questions.`;
         responseContent = `I didn't understand that. Add members like this: Tom 4155551234. You can also type 'Create Event', 'Sync Up' or 'exit' to do something else.`;
       }
       shouldSendSMS = true;
-      
-      // Send SMS and return early to prevent AI handler from overwriting action
-      await sendSMS(phone_number, responseContent, send_sms, phone_number);
-      
-      return new Response(JSON.stringify({
-        success: true,
-        action: 'INVALID_MEMBER_ADDING_MODE',
-        response: responseContent,
-        optimization: 'pattern_matching'
-      }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-      });
     } else if (action === 'INVALID_UNCLEAR_COMMAND') {
       console.log('INVALID_UNCLEAR_COMMAND detected, checking waiting_for state');
       
@@ -19472,45 +17513,6 @@ Reply with a command or contact support@funlet.ai with any questions.`;
         } else {
           responseContent = `I didn't understand that. Add members by:\n- Name already in Funlet: Tom\n- Name and number for a new crew member: Tom 4155551234\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
         }
-        shouldSendSMS = true;
-      } else if (conversationState?.waiting_for === 'crew_selection_manage') {
-        console.log('User is in crew_selection_manage, providing crew selection guidance');
-        
-        // Check if pagination is available by looking at extracted_data
-        let hasPagination = false;
-        let hasMore = false;
-        let hasPrevious = false;
-        const pageSize = 5;
-        
-        if (conversationState?.extracted_data && Array.isArray(conversationState.extracted_data)) {
-          for (let i = conversationState.extracted_data.length - 1; i >= 0; i--) {
-            const item = conversationState.extracted_data[i];
-            if (item.action === 'CHECK_CREW_MEMBERS' && item.crew_list) {
-              const totalCrews = item.crew_list.length;
-              const currentPage = item.current_page || 0;
-              
-              hasMore = totalCrews > (currentPage + 1) * pageSize;
-              hasPrevious = currentPage > 0;
-              hasPagination = hasMore || hasPrevious;
-              break;
-            }
-          }
-        }
-        
-        // Build error message with conditional pagination options
-        let errorMsg = `I didn't understand that. Reply with a crew number`;
-        if (hasPagination) {
-          if (hasMore && hasPrevious) {
-            errorMsg += `, 'Next' or 'N', 'Prev' or 'P'`;
-          } else if (hasMore) {
-            errorMsg += `, 'Next' or 'N'`;
-          } else if (hasPrevious) {
-            errorMsg += `, 'Prev' or 'P'`;
-          }
-        }
-        errorMsg += `, 'Done' or 'D', 'Create Crew', or 'exit'.`;
-        
-        responseContent = errorMsg;
         shouldSendSMS = true;
       } else if (conversationState?.waiting_for === 'crew_selection_for_members') {
         console.log('User is in crew_selection_for_members, providing crew selection guidance');
@@ -19548,11 +17550,6 @@ Reply with a command or contact support@funlet.ai with any questions.`;
         console.log('User is in crew_selection_for_send_invitations, providing crew selection guidance');
         
         responseContent = `I didn't understand that. Reply with a crew number, "Create Crew", or "exit" to do something else.`;
-        shouldSendSMS = true;
-      } else if (conversationState?.waiting_for === 'edit_contact_selection') {
-        console.log('User is in edit_contact_selection, providing contact selection guidance');
-        
-        responseContent = `I didn't understand that. Reply with a number or type 'exit'.`;
         shouldSendSMS = true;
       } else {
         // Default response for INVALID_UNCLEAR_COMMAND when not in specific state

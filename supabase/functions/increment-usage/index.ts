@@ -46,7 +46,7 @@ Deno.serve(async (req) => {
     }
 
     // Validate action_type
-    const validActions = ['ai_message', 'sms_message', 'create_event'];
+    const validActions = ['ai_interaction', 'sms_sent', 'create_event'];
     if (!validActions.includes(action_type)) {
       return new Response(JSON.stringify({
         error: 'Invalid action_type. Must be one of: ' + validActions.join(', ')

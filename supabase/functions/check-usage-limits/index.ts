@@ -30,7 +30,7 @@ Deno.serve(async (req) => {
 
   try {
     // Parse request body
-    const { phone_number, action_type = 'ai_message' } = await req.json();
+    const { phone_number, action_type = 'ai_interaction' } = await req.json();
 
     // Validate input
     if (!phone_number) {
@@ -71,9 +71,12 @@ Deno.serve(async (req) => {
       });
     }
 
+    // If no profile/subscription, allow by default per business rule
+    const noProfileOrPlan = !data || data.error === 'User not found' || !data.plan;
+
     // Generate upgrade message if limit exceeded
     let upgradeMessage = '';
-    if (!data.allowed && data.limit_exceeded) {
+    if (!noProfileOrPlan && !data.allowed && data.limit_exceeded) {
       const planNames = {
         'free': 'Free',
         'standard': 'Standard',
@@ -89,22 +92,22 @@ Deno.serve(async (req) => {
       };
 
       const limitMessages = {
-        'ai_messages': `You've used all ${data.usage.ai_messages_used} AI messages this month!`,
-        'sms_messages': `You've sent ${data.usage.sms_messages_used} SMS this month!`,
-        'events': `You've created ${data.usage.events_created} events this month!`
+        'ai_interaction': `You've been organizing a lot this month! Upgrade for more fun: funlet.ai/upgrade`,
+        'sms_sent': `You're really making the most of Funlet! Upgrade for more fun: funlet.ai/upgrade`,
+        'create_event': `You've created ${data.usage.events_created} events this month! Upgrade for more events: funlet.ai/upgrade`
       };
 
-      upgradeMessage = `${limitMessages[data.limit_exceeded]} Upgrade to ${nextTier[data.plan]} for more coordination: funlet.ai/upgrade`;
+      upgradeMessage = limitMessages[data.limit_exceeded] || `Upgrade to ${nextTier[data.plan]} for more coordination: funlet.ai/upgrade`;
     }
 
-    // Return the usage check result
+    // Return the usage check result (override to allowed when no profile/plan)
     return new Response(JSON.stringify({
-      allowed: data.allowed,
-      plan: data.plan,
-      limits: data.limits,
-      usage: data.usage,
-      limit_exceeded: data.limit_exceeded || null,
-      upgrade_message: upgradeMessage
+      allowed: noProfileOrPlan ? true : data.allowed,
+      plan: data.plan ?? null,
+      limits: data.limits ?? null,
+      usage: data.usage ?? null,
+      limit_exceeded: noProfileOrPlan ? null : (data.limit_exceeded || null),
+      upgrade_message: noProfileOrPlan ? '' : upgradeMessage
     }), {
       headers: {
         ...corsHeaders,

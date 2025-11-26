@@ -4754,13 +4754,13 @@ Deno.serve(async (req) => {
         case 'unknown':
         default:
           console.log('INVALID subtype: unknown - everything else that doesn\'t fit above categories');
-          response = 'I didn\'t understand that. Please try "create crew", "add members", or "help" for options.';
+          response = 'I didn\'t understand that. What would you like to do next? Type \'menu\' for options.';
           break;
           }
         }
       } else {
         // Fallback for when no user context
-        response = 'I didn\'t understand that. Please try "create crew", "add members", or "help" for options.';
+        response = 'I didn\'t understand that. What would you like to do next? Type \'menu\' for options.';
       }
       
       // Log invalid request for pattern analysis

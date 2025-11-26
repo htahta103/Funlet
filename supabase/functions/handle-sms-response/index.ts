@@ -418,9 +418,9 @@ Deno.serve(async (req) => {
       if (hostProfile) {
         console.log('User is a host, forwarding to funlet-sms-handler');
 
-        // Forward to funlet-sms-handler for AI processing
+        // Forward to funlet-sms-handler-v2 for AI processing
         try {
-          const handlerResponse = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/funlet-sms-handler`, {
+          const handlerResponse = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/funlet-sms-handler-v2`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -467,221 +467,55 @@ Deno.serve(async (req) => {
         });
       }
       
-      // If not a host, proceed with normal RSVP processing
-      console.log('User is not a host, processing as normal RSVP');
+      // If not a host, forward to funlet-sms-handler-v2 for pattern matching
+      console.log('User is not a host, forwarding to funlet-sms-handler-v2 for pattern matching');
       
-      // Try each phone variation until we find a match
-    let invitation = null;
-    let invitationError = null;
-    
-    for (const phoneVariation of phoneVariations) {
-      console.log('Searching for contact invitation with phone:', phoneVariation);
-      const { data, error } = await supabase
-        .from('invitations')
-        .select(`
-          id,
-          event_id,
-          contact_id,
-          response_note,
-          is_host,
-          events (title, location, event_date, start_time, end_time, creator_id, shorten_calendar_url),
-          contacts (first_name, phone_number)
-        `)
-        .eq('contacts.phone_number', phoneVariation)
-        .eq('response_note', 'no_response')
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .single();
-      
-      if (data && !error) {
-        invitation = data;
-        invitationError = null;
-        console.log('Found contact invitation with phone variation:', phoneVariation);
-        break;
-      } else {
-        console.log('No contact invitation found for phone variation:', phoneVariation);
-      }
-    }
-    
-    console.log('Contact invitation query result:', { invitation, invitationError });
+      try {
+        const handlerResponse = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/funlet-sms-handler-v2`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`
+          },
+          body: JSON.stringify({
+            message: body,
+            phone_number: formattedFromPhone,
+            is_host: false
+          })
+        });
 
-    if (invitationError || !invitation) {
-      console.log('No contact invitation found for commands 1/2/3');
+        if (handlerResponse.ok) {
+          const handlerData = await handlerResponse.json();
+          console.log('funlet-sms-handler-v2 response:', handlerData);
+          
+          return new Response(JSON.stringify({
+            success: true,
+            message: 'Message processed by pattern matching',
+            handler_response: handlerData
+          }), {
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'application/json'
+            }
+          });
+        } else {
+          console.error('funlet-sms-handler-v2 failed:', handlerResponse.status, await handlerResponse.text());
+        }
+      } catch (error) {
+        console.error('Failed to forward to funlet-sms-handler-v2:', error);
+      }
       
-      // If not a host or forwarding fails, return a helpful message
+      // If forwarding fails, return a helpful message
       return new Response(JSON.stringify({
         success: false,
         message: 'Message received but could not be processed',
-        suggestion: 'Try replying with 1=In, 2=Out, 3=Maybe, or 9 for events'
+        suggestion: 'Try replying with 1=In, 2=Out, 3=Maybe'
       }), {
         headers: {
           ...corsHeaders,
           'Content-Type': 'application/json'
         }
       });
-    }
-
-    console.log('Found invitation by phone number:', invitation.id);
-
-    // Parse the response (1=In, 2=Out, 3=Maybe)
-    let responseNote = 'no_response';
-    let responseText = '';
-    
-    if (cleanBody === '1' || cleanBody.includes('1')) {
-      responseNote = 'in';
-      responseText = 'in';
-    } else if (cleanBody === '2' || cleanBody.includes('2')) {
-      responseNote = 'out';
-      responseText = 'out';
-    } else if (cleanBody === '3' || cleanBody.includes('3')) {
-      responseNote = 'maybe';
-      responseText = 'maybe';
-    } else {
-      // Invalid response
-      responseNote = 'invalid';
-      responseText = 'invalid';
-    }
-
-    // Update the invitation with the response
-    const { data: updatedInvitation, error: updateError } = await supabase
-      .from('invitations')
-      .update({
-        response_note: responseNote,
-        responded_at: new Date().toISOString()
-      })
-      .eq('id', invitation.id)
-      .select()
-      .single();
-
-    if (updateError) {
-      console.error('Failed to update invitation:', updateError);
-      return new Response(JSON.stringify({
-        error: 'Failed to update invitation',
-        details: updateError.message
-      }), {
-        status: 500,
-        headers: {
-          ...corsHeaders,
-          'Content-Type': 'application/json'
-        }
-      });
-    }
-
-    // Format date for confirmation message
-    const formatDate = (dateString) => {
-      const date = new Date(dateString);
-      return date.toLocaleDateString('en-US', {
-        month: 'numeric',
-        day: 'numeric'
-      });
-    };
-
-    // Send confirmation SMS back to the user
-    let confirmationMessage = '';
-    const eventDate = formatDate(invitation.events.event_date);
-    
-    // Get calendar URL for responses that need it
-    const calendarUrl = invitation.events.shorten_calendar_url;
-    
-    if (responseNote === 'in') {
-      confirmationMessage = `You're In! for ${invitation.events.title} ${eventDate}. ${calendarUrl ? 'Add to Calendar ' + calendarUrl : 'See you there!'}`;
-    } else if (responseNote === 'out') {
-      confirmationMessage = `Got it, you're Out for ${invitation.events.title} ${eventDate}. Thanks for letting us know!`;
-    } else if (responseNote === 'maybe') {
-      confirmationMessage = `You replied Maybe for ${invitation.events.title} ${eventDate}. ${calendarUrl ? 'Add to Calendar ' + calendarUrl : 'Hope to see you!'}`;
-    } else {
-      confirmationMessage = `Please reply with 1=In, 2=Out, or 3=Maybe for ${invitation.events.title}.`;
-    }
-
-    console.log('=== CONFIRMATION MESSAGE PREP ===');
-    console.log('Response Note:', responseNote);
-    console.log('Event Title:', invitation.events.title);
-    console.log('Confirmation Message:', confirmationMessage);
-    console.log('From Phone:', fromPhone);
-    console.log('=== END CONFIRMATION PREP ===');
-
-    // Send confirmation SMS via Twilio
-    const Twilio = (await import('npm:twilio@4.22.0')).default;
-    const twilioClient = new Twilio(
-      Deno.env.get('TWILIO_ACCOUNT_SID'),
-      Deno.env.get('TWILIO_AUTH_TOKEN')
-    );
-
-    try {
-      const confirmationSMS = await twilioClient.messages.create({
-        body: confirmationMessage,
-        from: '+18887787794', // Use the same phone number as send-invitations
-        to: fromPhone,
-        shortenUrls: true
-      });
-      
-      console.log('=== CONFIRMATION SMS SENT ===');
-      console.log('Confirmation SMS SID:', confirmationSMS.sid);
-      console.log('To:', fromPhone);
-      console.log('Message:', confirmationMessage);
-      console.log('=== END CONFIRMATION SMS ===');
-      
-    } catch (smsError) {
-      console.error('Failed to send confirmation SMS:', smsError);
-      console.error('SMS Error Details:', JSON.stringify(smsError, null, 2));
-    }
-
-    // Log user action for RSVP response
-    if (responseNote === 'in' || responseNote === 'out' || responseNote === 'maybe') {
-      // Get the contact's user_id from the invitation
-      const { data: contactData } = await supabase
-        .from('contacts')
-        .select('user_id')
-        .eq('id', invitation.contact_id)
-        .single();
-
-      if (contactData?.user_id) {
-        await supabase
-          .from('user_actions')
-          .insert({
-            user_id: contactData.user_id,
-            action: `rsvp_${responseNote}`,
-            invitation_id: invitation.id,
-            event_id: invitation.event_id,
-            metadata: {
-              phone_number: fromPhone,
-              response_note: responseNote,
-              event_title: invitation.events.title
-            }
-          });
-      }
-    }
-
-    // Log the SMS interaction
-    await supabase
-      .from('sms_log')
-      .insert({
-        phone_number: fromPhone,
-        message_body: body,
-        direction: 'inbound',
-        invitation_id: invitation.id,
-        user_id: invitation.invited_by,
-        event_id: invitation.event_id,
-        message_type: 'rsvp_response',
-        intent_classification: {
-          response_type: responseNote,
-          original_message: body
-        }
-      });
-
-    return new Response(JSON.stringify({
-      success: true,
-      message: 'Response processed successfully',
-      invitation_id: invitation.id,
-      response: responseNote,
-      confirmation_sent: true
-    }), {
-      headers: {
-        ...corsHeaders,
-        'Content-Type': 'application/json'
-      }
-    });
-    
     } else {
       // Not an RSVP command (1, 2, 3) and not "9" - forward to funlet-sms-handler
       console.log('Message is not a valid command, forwarding to funlet-sms-handler');
@@ -709,7 +543,7 @@ Deno.serve(async (req) => {
       }
 
       try {
-        const handlerResponse = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/funlet-sms-handler`, {
+        const handlerResponse = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/funlet-sms-handler-v2`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

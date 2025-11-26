@@ -170,3 +170,22 @@ verify_jwt = false
 
 [functions."stripe-webhook"]
 verify_jwt = false
+
+[functions."reset-monthly-usage"]
+verify_jwt = false
+
+[functions."generate-payment-link"]
+verify_jwt = false
+
+[functions."cancel-subscription"]
+verify_jwt = false
+
+[functions."check-stripe-subscription"]
+verify_jwt = false
+
+[functions."list-customer-subscriptions"]
+verify_jwt = false
+
+[functions."funlet-sms-handler-v2"]
+verify_jwt = false
+

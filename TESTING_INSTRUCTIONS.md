@@ -34,11 +34,13 @@ DELETE FROM conversation_state WHERE user_id = (SELECT id FROM profiles WHERE em
 
 ### 3. **Test Command Template**
 ```bash
-curl -X POST "https://jjkduivjlzazcvdeeqde.supabase.co/functions/v1/funlet-sms-handler" \
+curl -X POST "https://jjkduivjlzazcvdeeqde.supabase.co/functions/v1/funlet-sms-handler-v2" \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Impqa2R1aXZqbHphemN2ZGVlcWRlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTIyNTUxOTgsImV4cCI6MjA2NzgzMTE5OH0.wo23Zti6Nz4knoN8aluS-wNb6AAVmXtaz-DSEKZaTrs" \
   -d '{
     "message": "YOUR_MESSAGE_HERE",
-    "phone_number": "+18777804236"
+    "phone_number": "+18777804236",
+    "is_host": true
   }' | jq '.'
 ```
 
@@ -804,41 +806,134 @@ curl -X POST "https://jjkduivjlzazcvdeeqde.supabase.co/functions/v1/funlet-sms-h
 
 ---
 
-## 6. SEND_MESSAGE WORKFLOW
+## 6. SEND_MESSAGE WORKFLOW - PATTERN-BASED IMPLEMENTATION
 
-### 6.1 Send Message to Event Participants
-**Purpose**: Test sending messages to event participants
+### 6.1 Send Message to Event Participants (Pattern-Driven)
+**Purpose**: Test the new pattern-based SEND_MESSAGE workflow with full state management
+**CRITICAL**: ALL 6 steps must complete successfully or TEST FAILS
 
-**Test Steps**:
-1. **Request to Send Message**:
-   ```json
-   {"message": "send message", "phone_number": "+18777804236"}
-   ```
-   **Expected**: SEND_MESSAGE action, shows event list
+**MANDATORY RESET BEFORE TEST**:
+```sql
+-- Ensure user is onboarded with events and invitations
+UPDATE profiles SET is_onboarded = true WHERE email = 'htahta103@gmail.com';
+```
 
-2. **Select Event**:
-   ```json
-   {"message": "1", "phone_number": "+18777804236"}
-   ```
-   **Expected**: Shows targeting options (Everyone, Non-responders, Coming, Maybe, Out)
+**STEP-BY-STEP TESTING**:
 
-3. **Select Target Group**:
-   ```json
-   {"message": "1", "phone_number": "+18777804236"}
-   ```
-   **Expected**: Asks for message text
+#### **Step 1: Start Send Message (Pattern Detection)**
+```bash
+curl -X POST "https://jjkduivjlzazcvdeeqde.supabase.co/functions/v1/funlet-sms-handler-v2" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "send message", "phone_number": "+18777804236", "is_host": true}' | jq '.'
+```
+**✅ SUCCESS CRITERIA**:
+- `action` = "SEND_MESSAGE"
+- `content` shows context selection: "Message about: 1. Sync up 2. Event"
+- `waiting_for` = "send_message_context"
+- `optimization` = "pattern_matching"
 
-4. **Provide Message Text**:
-   ```json
-   {"message": "Don't forget to bring your equipment tomorrow!", "phone_number": "+18777804236"}
-   ```
-   **Expected**: Shows confirmation prompt
+**❌ FAILURE CRITERIA**:
+- Wrong action returned
+- No context selection shown
+- Wrong waiting state
 
-5. **Confirm Message Sending**:
-   ```json
-   {"message": "yes", "phone_number": "+18777804236"}
-   ```
-   **Expected**: Sends message to selected group
+#### **Step 2: Select Context (Event)**
+```bash
+curl -X POST "https://jjkduivjlzazcvdeeqde.supabase.co/functions/v1/funlet-sms-handler-v2" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "2", "phone_number": "+18777804236", "is_host": true}' | jq '.'
+```
+**✅ SUCCESS CRITERIA**:
+- `action` = "SEND_MESSAGE"
+- `content` shows event list with numbered options
+- `waiting_for` = "event_selection_send_message"
+
+**❌ FAILURE CRITERIA**:
+- Wrong action returned
+- No event list shown
+- Wrong waiting state
+
+#### **Step 3: Select Event**
+```bash
+curl -X POST "https://jjkduivjlzazcvdeeqde.supabase.co/functions/v1/funlet-sms-handler-v2" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "1", "phone_number": "+18777804236", "is_host": true}' | jq '.'
+```
+**✅ SUCCESS CRITERIA**:
+- `action` = "SEND_MESSAGE"
+- `content` shows targeting options: "Who should we message? 1. Everyone 2. Non-responders 3. Coming 4. Maybe 5. Can't come"
+- `waiting_for` = "targeting_selection"
+
+**❌ FAILURE CRITERIA**:
+- Wrong action returned
+- No targeting options shown
+- Wrong waiting state
+
+#### **Step 4: Select Targeting Group**
+```bash
+curl -X POST "https://jjkduivjlzazcvdeeqde.supabase.co/functions/v1/funlet-sms-handler-v2" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "2", "phone_number": "+18777804236", "is_host": true}' | jq '.'
+```
+**✅ SUCCESS CRITERIA**:
+- `action` = "SEND_MESSAGE"
+- `content` = "Enter your message (max 160 chars)."
+- `waiting_for` = "message_text"
+
+**❌ FAILURE CRITERIA**:
+- Wrong action returned
+- No message prompt shown
+- Wrong waiting state
+
+#### **Step 5: Provide Message Text**
+```bash
+curl -X POST "https://jjkduivjlzazcvdeeqde.supabase.co/functions/v1/funlet-sms-handler-v2" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Reminder: Basketball Practice starts at 3pm Saturday. Bring water!", "phone_number": "+18777804236", "is_host": true}' | jq '.'
+```
+**✅ SUCCESS CRITERIA**:
+- `action` = "SEND_MESSAGE"
+- `content` shows confirmation: "Send 'Reminder: Basketball Practice starts at 3pm Saturday. Bring water!' to your selected group (X people)? Reply 'yes' to confirm."
+- `waiting_for` = "message_confirmation"
+
+**❌ FAILURE CRITERIA**:
+- Wrong action returned
+- No confirmation prompt
+- Wrong waiting state
+
+#### **Step 6: Confirm and Send**
+```bash
+curl -X POST "https://jjkduivjlzazcvdeeqde.supabase.co/functions/v1/funlet-sms-handler-v2" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "yes", "phone_number": "+18777804236", "is_host": true}' | jq '.'
+```
+**✅ SUCCESS CRITERIA**:
+- `action` = "SEND_MESSAGE"
+- `content` = "Message sent to X recipient(s)."
+- State cleared (`waiting_for` = null)
+- SMS messages sent successfully
+
+**❌ FAILURE CRITERIA**:
+- Wrong action returned
+- No success message
+- State not cleared
+- SMS not sent
+
+### **SEND_MESSAGE TEST RESULT**:
+- **✅ PASS**: All 6 steps completed successfully
+- **❌ FAIL**: Any step failed or workflow incomplete
+
+### **KEY FEATURES TESTED**:
+1. ✅ **Pattern detection** - Explicit SEND_MESSAGE commands bypass AI
+2. ✅ **Context selection** - Choose between Sync up or Event messaging
+3. ✅ **Event selection** - List and select from active events
+4. ✅ **Targeting options** - Everyone, Non-responders, Coming, Maybe, Out with counts
+5. ✅ **Message composition** - 160-character limit validation
+6. ✅ **Confirmation flow** - Preview with recipient count before sending
+7. ✅ **SMS delivery** - Messages sent to selected recipients
+8. ✅ **State management** - Proper waiting_for transitions and cleanup
+9. ✅ **Error handling** - Invalid inputs handled gracefully
+10. ✅ **Zero AI usage** - Entire workflow handled by patterns only
 
 ---
 
@@ -1214,22 +1309,23 @@ curl -X POST "https://jjkduivjlzazcvdeeqde.supabase.co/functions/v1/funlet-sms-h
 ## 🎯 MANDATORY TEST EXECUTION ORDER
 
 ### **PHASE 1: CORE WORKFLOWS (MUST PASS)**
-1. **RECEIVE_MESSAGE FLOW** (2 steps) - **CRITICAL**
-2. **ONBOARDING FLOW** (8 steps) - **CRITICAL**
-3. **INVITE MORE PEOPLE - EXISTING CREW PATH** (5 steps) - **CRITICAL**
-4. **INVITE MORE PEOPLE - NEW CONTACTS PATH** (5 steps) - **CRITICAL**
+1. **ONBOARDING FLOW** (8 steps) - **CRITICAL**
+2. **INVITE MORE PEOPLE - EXISTING CREW PATH** (5 steps) - **CRITICAL**
+3. **INVITE MORE PEOPLE - NEW CONTACTS PATH** (5 steps) - **CRITICAL**
+4. **SEND_MESSAGE WORKFLOW** (6 steps) - **CRITICAL**
 5. **HELP SYSTEM** (Multiple scenarios) - **CRITICAL**
 
 ### **PHASE 2: SUPPORTING WORKFLOWS**
 6. **CREW MANAGEMENT** (Create, Add Members, Check Members)
-7. **SEND_INVITATIONS** (Create Event, Send Invitations)
-8. **SEND_MESSAGE** (Send Message to Participants)
+7. **ENHANCED ADD_CREW_MEMBERS** (All scenarios: multiple crews, single crew, zero crews, crew name specified)
+8. **SEND_INVITATIONS** (Corrected field order: name → date → time → location → notes → confirmation)
 9. **CHECK_RSVPS** (View RSVP Responses)
+10. **RECEIVE_MESSAGE FLOW** (2 steps)
 
 ### **PHASE 3: EDGE CASES**
-10. **ERROR HANDLING**
-11. **CONFIRMATION FLOWS**
-12. **CONVERSATION STATE TESTING**
+11. **ERROR HANDLING**
+12. **CONFIRMATION FLOWS**
+13. **CONVERSATION STATE TESTING**
 
 ---
 
@@ -1241,14 +1337,18 @@ curl -X POST "https://jjkduivjlzazcvdeeqde.supabase.co/functions/v1/funlet-sms-h
 - **Conversation state corruption** → **TEST FAILED**
 - **Database inconsistencies** → **TEST FAILED**
 - **SMS sending failures** → **TEST FAILED**
+- **Pattern matching fails to activate** → **TEST FAILED**
+- **AI fallback when patterns should handle** → **TEST FAILED**
 
 ### ✅ **SUCCESS REQUIREMENTS**
 - **ALL steps in each workflow must complete**
 - **Correct action returned at each step**
-- **Proper conversation state management**
-- **Clean state clearing after completion**
-- **Database integrity maintained**
+- **Proper conversation state management** with waiting_for transitions
+- **Clean state clearing after completion** (waiting_for = null)
+- **Database integrity maintained** with proper constraints
 - **SMS messages sent successfully**
+- **Pattern matching takes priority** over AI for explicit commands
+- **Zero AI usage** for core workflows (SEND_MESSAGE, ADD_CREW_MEMBERS, etc.)
 
 ---
 
@@ -1279,24 +1379,28 @@ curl -X POST "https://jjkduivjlzazcvdeeqde.supabase.co/functions/v1/funlet-sms-h
 ## 🎯 EXPECTED RESULTS SUMMARY
 
 ### ✅ **SUCCESSFUL FLOW INDICATORS**:
-- Correct action classification by AI assistant
-- Proper conversation state management
-- Accurate data extraction and storage
-- Appropriate SMS responses
-- Clean state clearing after completion
-- HELP requests properly detected and categorized
-- Database integrity maintained
-- All workflow steps completed
+- **Pattern matching priority** - Explicit commands (SEND_MESSAGE, ADD_MEMBERS) bypass AI completely
+- **Correct action classification** by pattern matching (no AI dependency for core flows)
+- **Proper conversation state management** with waiting_for transitions
+- **Accurate data extraction and storage** for all workflows
+- **Appropriate SMS responses** with proper formatting and optimization flags
+- **Clean state clearing after completion** - waiting_for set to null
+- **HELP requests properly detected and categorized** with logging
+- **Database integrity maintained** with proper foreign key constraints
+- **All workflow steps completed** successfully with pattern matching
+- **Zero AI usage** for core workflows (SEND_MESSAGE, ADD_CREW_MEMBERS, etc.)
+- **Enhanced error handling** with graceful degradation and user guidance
 
 ### ❌ **FAILURE INDICATORS**:
-- Wrong action classification
-- Conversation state corruption
-- Missing or incorrect data
-- SMS sending failures
-- State not cleared after completion
-- HELP requests not properly detected or categorized
-- Database inconsistencies
-- Incomplete workflows
+- **Wrong action classification** - AI fallback when patterns should handle
+- **Conversation state corruption** - incorrect waiting_for or extracted_data
+- **Missing or incorrect data** - pattern extraction failures
+- **SMS sending failures** - delivery errors or missing messages
+- **State not cleared after completion** - persistent waiting_for values
+- **HELP requests not properly detected or categorized**
+- **Database inconsistencies** - orphaned records or constraint violations
+- **Incomplete workflows** - steps not completing or wrong action sequences
+- **Pattern matching failures** - commands not recognized despite pattern definitions
 
 ### 🔍 **DEBUGGING TIPS**:
 1. **Check conversation state** after each step
@@ -2234,14 +2338,18 @@ curl -X POST "https://jjkduivjlzazcvdeeqde.supabase.co/functions/v1/funlet-sms-h
 - **Conversation state corruption** → **TEST FAILED**
 - **Database inconsistencies** → **TEST FAILED**
 - **SMS sending failures** → **TEST FAILED**
+- **Pattern matching fails to activate** → **TEST FAILED**
+- **AI fallback when patterns should handle** → **TEST FAILED**
 
 ### ✅ **SUCCESS REQUIREMENTS**
 - **ALL steps in each workflow must complete**
 - **Correct action returned at each step**
-- **Proper conversation state management**
-- **Clean state clearing after completion**
-- **Database integrity maintained**
+- **Proper conversation state management** with waiting_for transitions
+- **Clean state clearing after completion** (waiting_for = null)
+- **Database integrity maintained** with proper constraints
 - **SMS messages sent successfully**
+- **Pattern matching takes priority** over AI for explicit commands
+- **Zero AI usage** for core workflows (SEND_MESSAGE, ADD_CREW_MEMBERS, etc.)
 
 ---
 
@@ -2272,24 +2380,28 @@ curl -X POST "https://jjkduivjlzazcvdeeqde.supabase.co/functions/v1/funlet-sms-h
 ## 🎯 EXPECTED RESULTS SUMMARY
 
 ### ✅ **SUCCESSFUL FLOW INDICATORS**:
-- Correct action classification by AI assistant
-- Proper conversation state management
-- Accurate data extraction and storage
-- Appropriate SMS responses
-- Clean state clearing after completion
-- HELP requests properly detected and categorized
-- Database integrity maintained
-- All workflow steps completed
+- **Pattern matching priority** - Explicit commands (SEND_MESSAGE, ADD_MEMBERS) bypass AI completely
+- **Correct action classification** by pattern matching (no AI dependency for core flows)
+- **Proper conversation state management** with waiting_for transitions
+- **Accurate data extraction and storage** for all workflows
+- **Appropriate SMS responses** with proper formatting and optimization flags
+- **Clean state clearing after completion** - waiting_for set to null
+- **HELP requests properly detected and categorized** with logging
+- **Database integrity maintained** with proper foreign key constraints
+- **All workflow steps completed** successfully with pattern matching
+- **Zero AI usage** for core workflows (SEND_MESSAGE, ADD_CREW_MEMBERS, etc.)
+- **Enhanced error handling** with graceful degradation and user guidance
 
 ### ❌ **FAILURE INDICATORS**:
-- Wrong action classification
-- Conversation state corruption
-- Missing or incorrect data
-- SMS sending failures
-- State not cleared after completion
-- HELP requests not properly detected or categorized
-- Database inconsistencies
-- Incomplete workflows
+- **Wrong action classification** - AI fallback when patterns should handle
+- **Conversation state corruption** - incorrect waiting_for or extracted_data
+- **Missing or incorrect data** - pattern extraction failures
+- **SMS sending failures** - delivery errors or missing messages
+- **State not cleared after completion** - persistent waiting_for values
+- **HELP requests not properly detected or categorized**
+- **Database inconsistencies** - orphaned records or constraint violations
+- **Incomplete workflows** - steps not completing or wrong action sequences
+- **Pattern matching failures** - commands not recognized despite pattern definitions
 
 ### 🔍 **DEBUGGING TIPS**:
 1. **Check conversation state** after each step

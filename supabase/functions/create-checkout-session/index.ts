@@ -44,18 +44,23 @@ Deno.serve(async (req) => {
   }
 
   try {
+    // Parse request body first to check for sandbox mode
+    const { userId, userEmail, priceId, successUrl, cancelUrl, is_sandbox = false } = await req.json();
+    
+    const stripeSecretKey = is_sandbox
+      ? Deno.env.get('STRIPE_SECRET_KEY_TEST')
+      : Deno.env.get('STRIPE_SECRET_KEY');
+
     // Validate Stripe secret key
-    if (!Deno.env.get('STRIPE_SECRET_KEY')) {
+    if (!stripeSecretKey) {
       throw new Error('STRIPE_SECRET_KEY is not set');
     }
 
     // Initialize Stripe with secret key
-    const stripe = new Stripe(Deno.env.get('STRIPE_SECRET_KEY'), {
+    const stripe = new Stripe(stripeSecretKey, {
       apiVersion: '2023-10-16'
     });
 
-    // Parse request body
-    const { userId, userEmail, priceId, successUrl, cancelUrl } = await req.json();
 
     // Validate required fields
     if (!userId || !userEmail || !priceId || !successUrl || !cancelUrl) {
