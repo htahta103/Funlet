@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Connecting Google Calendar...</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: #fff;
+    }
+    .container {
+      text-align: center;
+      padding: 40px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 20px;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+    }
+    .spinner {
+      border: 4px solid rgba(255, 255, 255, 0.3);
+      border-top: 4px solid #fff;
+      border-radius: 50%;
+      width: 50px;
+      height: 50px;
+      animation: spin 1s linear infinite;
+      margin: 20px auto;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    h1 { font-size: 24px; margin-bottom: 10px; }
+    p { font-size: 16px; opacity: 0.9; }
+    .error { color: #ff6b6b; margin-top: 20px; }
+    .success { color: #51cf66; margin-top: 20px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="spinner"></div>
+    <h1>Connecting Google Calendar...</h1>
+    <p id="status">Processing authentication...</p>
+    <div id="error" class="error" style="display: none;"></div>
+  </div>
+  <script>
+    (function() {
+      // These values will be injected by the Edge Function
+      const supabaseUrl = '{{SUPABASE_URL}}';
+      const anonKey = '{{ANON_KEY}}';
+      const redirectUri = '{{REDIRECT_URI}}';
+      
+      const statusEl = document.getElementById('status');
+      const errorEl = document.getElementById('error');
+      
+      console.log('🔍 Current URL:', window.location.href);
+      console.log('🔍 Redirect URI:', redirectUri);
+      
+      // Extract tokens from URL hash
+      const hashParams = new URLSearchParams(window.location.hash.substring(1));
+      const accessToken = hashParams.get('access_token');
+      const providerToken = hashParams.get('provider_token');
+      const providerRefreshToken = hashParams.get('provider_refresh_token');
+      const expiresAt = hashParams.get('expires_at');
+      const expiresIn = hashParams.get('expires_in');
+      const scope = hashParams.get('provider_token_scope') || hashParams.get('scope');
+      
+      console.log('📋 Hash params:', {
+        hasAccessToken: !!accessToken,
+        hasProviderToken: !!providerToken,
+        hasProviderRefreshToken: !!providerRefreshToken,
+        allHashParams: Object.fromEntries(hashParams.entries())
+      });
+      
+      // Check if we have required tokens
+      if (!accessToken || !providerToken) {
+        const errorMsg = 'Missing required tokens in OAuth callback';
+        console.error('❌', errorMsg);
+        statusEl.textContent = 'Error: Missing tokens';
+        errorEl.textContent = errorMsg;
+        errorEl.style.display = 'block';
+        return;
+      }
+      
+      // Extract user_id from access_token JWT
+      let userId = null;
+      try {
+        const jwtParts = accessToken.split('.');
+        if (jwtParts.length === 3) {
+          const payload = JSON.parse(atob(jwtParts[1].replace(/-/g, '+').replace(/_/g, '/')));
+          userId = payload.sub;
+          console.log('✅ User ID extracted:', userId);
+        }
+      } catch (e) {
+        console.error('❌ Failed to extract user_id:', e);
+        statusEl.textContent = 'Error: Invalid token';
+        errorEl.textContent = 'Could not extract user ID from token';
+        errorEl.style.display = 'block';
+        return;
+      }
+      
+      if (!userId) {
+        const errorMsg = 'Could not extract user ID';
+        console.error('❌', errorMsg);
+        statusEl.textContent = 'Error: Invalid token';
+        errorEl.textContent = errorMsg;
+        errorEl.style.display = 'block';
+        return;
+      }
+      
+      // Update status
+      statusEl.textContent = 'Saving tokens...';
+      
+      // Call store-google-calendar-tokens function to save to database
+      // This function uses service role key, so no JWT needed in Authorization header
+      fetch(supabaseUrl + '/functions/v1/store-google-calendar-tokens', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': anonKey
+        },
+        body: JSON.stringify({
+          user_id: userId,
+          provider_token: providerToken,
+          provider_refresh_token: providerRefreshToken || null,
+          expires_at: expiresAt ? parseInt(expiresAt) : null,
+          expires_in: expiresIn ? parseInt(expiresIn) : 3600,
+          scope: scope || 'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/calendar.events'
+        })
+      })
+      .then(response => response.json())
+      .then(data => {
+        if (data.success || data.user_id) {
+          console.log('✅ Tokens stored successfully:', data);
+          statusEl.textContent = 'Success! Redirecting...';
+          statusEl.className = 'success';
+          
+          // Redirect to final page with tokens in hash
+          // Format: redirect_link + #access_token=...&provider_token=...
+          if (redirectUri && redirectUri !== 'null' && redirectUri !== '') {
+            console.log('🔄 Redirecting to:', redirectUri);
+            
+            // Preserve the hash (tokens) when redirecting
+            const currentHash = window.location.hash;
+            let finalRedirectUrl = redirectUri;
+            
+            // Ensure redirect_uri doesn't already have a hash
+            try {
+              const redirectUrlObj = new URL(redirectUri);
+              if (redirectUrlObj.hash) {
+                // If redirect_uri has a hash, replace it with current hash
+                finalRedirectUrl = redirectUri.replace(redirectUrlObj.hash, '') + currentHash;
+              } else {
+                // Append current hash to redirect_uri
+                finalRedirectUrl = redirectUri + currentHash;
+              }
+            } catch (e) {
+              // If redirectUri is not a full URL, just append hash
+              finalRedirectUrl = redirectUri + currentHash;
+            }
+            
+            console.log('🔄 Final redirect URL:', finalRedirectUrl);
+            console.log('🔄 Hash being preserved:', currentHash.substring(0, 50) + '...');
+            
+            setTimeout(() => {
+              window.location.href = finalRedirectUrl;
+            }, 1000);
+          } else {
+            statusEl.textContent = 'Success! Tokens saved.';
+            statusEl.className = 'success';
+            console.log('⚠️  No redirect URI provided - tokens saved to database');
+          }
+        } else {
+          throw new Error(data.error || data.details || 'Failed to store tokens');
+        }
+      })
+      .catch(error => {
+        console.error('❌ Error storing tokens:', error);
+        statusEl.textContent = 'Error saving tokens';
+        errorEl.textContent = error.message || 'Failed to save tokens. Please try again.';
+        errorEl.style.display = 'block';
+        
+        // Even if saving fails, still redirect with tokens in hash so user can retry
+        if (redirectUri && redirectUri !== 'null' && redirectUri !== '') {
+          console.log('⚠️  Redirecting anyway with tokens in hash');
+          const currentHash = window.location.hash;
+          setTimeout(() => {
+            window.location.href = redirectUri + currentHash;
+          }, 2000);
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
+
+
+
+

@@ -1,0 +1,190 @@
+[
+  {
+    "test_id": "AS-001",
+    "test_name": "Start Auto Sync with no crews",
+    "expected": "System responds that no crews exist and exits",
+    "request": "auto sync",
+    "response": {
+      "success": true,
+      "action": "AUTO_SYNC",
+      "response": "You don't have any crews yet. Text create crew to get started.",
+      "optimization": "pattern_matching"
+    },
+    "status": "PASS",
+    "notes": "Correctly detected no crews",
+    "timestamp": "2026-01-02T11:31:03.787703"
+  },
+  {
+    "test_id": "AS-002",
+    "test_name": "Start Auto Sync with crew selection",
+    "expected": "Crew selected, system prompts for event name",
+    "request": "auto sync Friends",
+    "response": {
+      "success": true,
+      "action": "AUTO_SYNC",
+      "response": "You don't have any crews yet. Text create crew to get started.",
+      "optimization": "pattern_matching"
+    },
+    "status": "FAIL",
+    "notes": "Unexpected: You don't have any crews yet. Text create crew to get started.",
+    "timestamp": "2026-01-02T11:31:07.071501"
+  },
+  {
+    "test_id": "AS-003",
+    "test_name": "Invalid crew name",
+    "expected": "System responds crew not found",
+    "request": "auto sync FakeCrew",
+    "response": {
+      "success": true,
+      "action": "AUTO_SYNC",
+      "response": "You don't have any crews yet. Text create crew to get started.",
+      "optimization": "pattern_matching"
+    },
+    "status": "FAIL",
+    "notes": "Did not reject: You don't have any crews yet. Text create crew to get started.",
+    "timestamp": "2026-01-02T11:31:14.117741"
+  },
+  {
+    "test_id": "AS-004",
+    "test_name": "Event name required",
+    "expected": "System re-prompts for event name",
+    "request": "blank/spaces after crew selection",
+    "response": {
+      "success": true,
+      "action": "INVALID",
+      "response": "I didn't understand that. Try again or type 'menu' to see what you can do.",
+      "confidence": 0.95,
+      "extracted_params": {
+        "invalid_subtype": "INVALID_GIBBERISH"
+      },
+      "model_used": "gpt-4o-mini",
+      "assistant_id": "asst_9kEyZG4LBZqcGD0myFEI6BgN",
+      "thread_id": "thread_F8p3FZicA7qcKLcw3aBBeqBT",
+      "assistant_response": "{\"action\":\"INVALID\",\"subtype\":\"INVALID_GIBBERISH\"}",
+      "is_structured_response": true
+    },
+    "status": "FAIL",
+    "notes": "Did not re-prompt: I didn't understand that. Try again or type 'menu' to see what you can do.",
+    "timestamp": "2026-01-02T11:31:27.395640"
+  },
+  {
+    "test_id": "AS-005",
+    "test_name": "Exit during setup",
+    "expected": "Auto Sync is discarded; normal chat resumes",
+    "request": "exit",
+    "response": {
+      "success": true,
+      "action": "EXIT",
+      "response": "What would you like to do next?",
+      "optimization": "pattern_matching"
+    },
+    "status": "FAIL",
+    "notes": "Did not cancel: What would you like to do next?",
+    "timestamp": "2026-01-02T11:31:44.944941"
+  },
+  {
+    "test_id": "AS-006",
+    "test_name": "Calendar connected auto-detection",
+    "expected": "Calendar is used automatically; no calendar prompt shown",
+    "request": "auto sync Friends -> Test Event",
+    "response": {
+      "success": true,
+      "action": "INVALID_UNCLEAR_COMMAND",
+      "response": "I didn't understand that. Try again or type 'menu' to see what you can do.",
+      "confidence": 0.95,
+      "extracted_params": {},
+      "model_used": "gpt-4o-mini",
+      "assistant_id": "asst_9kEyZG4LBZqcGD0myFEI6BgN",
+      "thread_id": "thread_llRSrtDVY2fa9NuwHhakWlpH",
+      "assistant_response": "{\"action\":\"INVALID_UNCLEAR_COMMAND\"}",
+      "is_structured_response": true
+    },
+    "status": "SKIP",
+    "notes": "User has no calendar tokens: I didn't understand that. Try again or type 'menu' to see what you can do.",
+    "timestamp": "2026-01-02T11:31:58.655779"
+  },
+  {
+    "test_id": "AS-007",
+    "test_name": "Calendar not connected",
+    "expected": "Auto Sync proceeds in no-calendar mode",
+    "request": "auto sync Friends -> Test Event",
+    "response": {
+      "success": true,
+      "action": "INVALID_UNCLEAR_COMMAND",
+      "response": "I didn't understand that. Try again or type 'menu' to see what you can do.",
+      "confidence": 0.95,
+      "extracted_params": {},
+      "model_used": "gpt-4o-mini",
+      "assistant_id": "asst_9kEyZG4LBZqcGD0myFEI6BgN",
+      "thread_id": "thread_xylIDDekNpjsCv42wKbQlVe4",
+      "assistant_response": "{\"action\":\"INVALID_UNCLEAR_COMMAND\"}",
+      "is_structured_response": true
+    },
+    "status": "FAIL",
+    "notes": "Wrong mode: I didn't understand that. Try again or type 'menu' to see what you can do.",
+    "timestamp": "2026-01-02T11:32:11.883269"
+  },
+  {
+    "test_id": "AS-008",
+    "test_name": "No calendar prompt shown",
+    "expected": "System does not prompt to connect calendar",
+    "request": "auto sync Friends -> Test Event",
+    "response": {
+      "success": true,
+      "action": "INVALID_UNCLEAR_COMMAND",
+      "response": "I didn't understand that. Try again or type 'menu' to see what you can do.",
+      "confidence": 0.95,
+      "extracted_params": {},
+      "model_used": "gpt-4o-mini",
+      "assistant_id": "asst_9kEyZG4LBZqcGD0myFEI6BgN",
+      "thread_id": "thread_5Y3szFyJAN6g0goeu4DliJEj",
+      "assistant_response": "{\"action\":\"INVALID_UNCLEAR_COMMAND\"}",
+      "is_structured_response": true
+    },
+    "status": "PASS",
+    "notes": "No calendar prompt shown",
+    "timestamp": "2026-01-02T11:32:25.257764"
+  },
+  {
+    "test_id": "AS-009",
+    "test_name": "Calendar mode time window input",
+    "expected": "System evaluates calendar",
+    "request": "next week evenings",
+    "response": {
+      "success": true,
+      "action": "INVALID_UNCLEAR_COMMAND",
+      "response": "I didn't understand that. Try again or type 'menu' to see what you can do.",
+      "confidence": 0.95,
+      "extracted_params": {},
+      "model_used": "gpt-4o-mini",
+      "assistant_id": "asst_9kEyZG4LBZqcGD0myFEI6BgN",
+      "thread_id": "thread_a0Kr2qwRCdHupyGlusWcDnSU",
+      "assistant_response": "{\"action\":\"INVALID_UNCLEAR_COMMAND\"}",
+      "is_structured_response": true
+    },
+    "status": "SKIP",
+    "notes": "Requires calendar tokens: I didn't understand that. Try again or type 'menu' to see what you can do.",
+    "timestamp": "2026-01-02T11:32:48.072040"
+  },
+  {
+    "test_id": "AS-010",
+    "test_name": "Calendar search produces option",
+    "expected": "System proposes first option with calendar view",
+    "request": "next week evenings",
+    "response": {
+      "success": true,
+      "action": "INVALID_UNCLEAR_COMMAND",
+      "response": "I didn't understand that. Try again or type 'menu' to see what you can do.",
+      "confidence": 0.95,
+      "extracted_params": {},
+      "model_used": "gpt-4o-mini",
+      "assistant_id": "asst_9kEyZG4LBZqcGD0myFEI6BgN",
+      "thread_id": "thread_fvCZcBh8RhjpORQxYr810dWS",
+      "assistant_response": "{\"action\":\"INVALID_UNCLEAR_COMMAND\"}",
+      "is_structured_response": true
+    },
+    "status": "SKIP",
+    "notes": "Requires calendar tokens: I didn't understand that. Try again or type 'menu' to see what you can do.",
+    "timestamp": "2026-01-02T11:33:11.788391"
+  }
+]

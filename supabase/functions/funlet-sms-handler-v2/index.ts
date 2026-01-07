@@ -1,4 +1,6 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import { logWorkflowStart, logWorkflowProgress, logWorkflowComplete, logWorkflowError, logCrewCreated, logWorkflowAction, logError } from './logger.ts';
+import { sendSMS, logSMSReceived } from './sms.ts';
 
 // CORS headers
 const corsHeaders = {
@@ -6,138 +8,6 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization'
 };
-
-// Helper function to send SMS messages
-async function sendSMS(
-  phoneNumber: string, 
-  message: string, 
-  shouldSend: boolean = true,
-  owner_phone_number: string | null = null
-) {
-  try {
-    // Create Supabase client (needed for both paths)
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
-    
-    // Find user by phone number (needed for both paths)
-    const normalizedPhone = phoneNumber.replace(/\D/g, '');
-    const phoneVariations = [normalizedPhone];
-    if (normalizedPhone.length === 11 && normalizedPhone.startsWith('1')) {
-      phoneVariations.push(normalizedPhone.substring(1));
-    }
-    if (normalizedPhone.length === 10) {
-      phoneVariations.push('1' + normalizedPhone);
-    }
-    const plusVariations = phoneVariations.map(phone => '+' + phone);
-    phoneVariations.push(...plusVariations);
-    
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('id, sms_sent_count')
-      .in('phone_number', phoneVariations)
-      .single();
-    
-    // Check SMS limit for the owner (person who initiated the action)
-    // TEMPORARILY DISABLED FOR TESTING
-    if (false && shouldSend && owner_phone_number) {
-      const checkPhoneNumber = owner_phone_number; // Always check owner's limit
-      
-      try {
-        const smsLimitResponse = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/check-usage-limits`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            phone_number: checkPhoneNumber,
-            action_type: 'sms_sent'
-          })
-        });
-        
-        const smsLimitData = await smsLimitResponse.json();
-        
-        if (!smsLimitData.allowed) {
-          console.log('❌ SMS limit exceeded for owner:', checkPhoneNumber);
-          // Don't send SMS, return error
-          return { 
-            success: false, 
-            error: 'SMS_LIMIT_EXCEEDED',
-            limit_data: smsLimitData 
-          };
-        }
-      } catch (error) {
-        console.error('⚠️ Error checking SMS limits:', error);
-        // Continue sending on error (fail open)
-      }
-    }
-
-    // Save to database when NOT sending (send_sms = false)
-    if (!shouldSend) {
-      if (profile?.id) {
-        await supabase
-          .from('message_thread')
-          .insert({
-            user_id: profile.id,
-            phone_number: phoneNumber,
-            message: message,
-            role: 'assistant',
-            sent: false,
-            sent_at: null
-          });
-        console.log('SMS skipped (send_sms=false), saved to message_thread');
-      }
-      return { success: true, skipped: true };
-    }
-
-    // When shouldSend=true, send via Twilio
-    const TWILIO_ACCOUNT_SID = Deno.env.get('TWILIO_ACCOUNT_SID');
-    const TWILIO_AUTH_TOKEN = Deno.env.get('TWILIO_AUTH_TOKEN');
-    const TWILIO_PHONE_NUMBER = '+18887787794';
-
-    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
-      console.error('Twilio credentials not configured');
-      return { success: false, error: 'Twilio credentials not configured' };
-    }
-
-    const Twilio = (await import('npm:twilio@4.22.0')).default;
-    const twilioClient = new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-
-    console.log('Sending SMS to:', phoneNumber);
-    console.log('SMS message:', message);
-
-    const smsResult = await twilioClient.messages.create({
-      body: message,
-      from: TWILIO_PHONE_NUMBER,
-      to: phoneNumber,
-      shortenUrls: true
-    });
-
-    console.log('SMS sent successfully:', smsResult.sid);
-    
-    // After successful Twilio message send, increment SMS count for owner
-    if (owner_phone_number) {
-      fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/increment-usage`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          phone_number: owner_phone_number,
-          action_type: 'sms_sent'
-        })
-      }).catch(error => console.error('Error incrementing SMS usage for owner:', error));
-    }
-    
-    return { success: true, sid: smsResult.sid };
-    
-  } catch (error) {
-    console.error('Failed to send SMS:', error);
-    return { success: false, error: error.message };
-  }
-}
 
 // PATTERN MATCHING FUNCTIONS - Tier 1 Optimization (bypass AI for common commands)
 
@@ -147,25 +17,67 @@ function checkCreateCrewPattern(message: string): { isMatch: boolean, crewName: 
   const originalMessage = message.trim();
   
   const createCrewPatterns = [
-    // Direct commands
+    // ========== CREW PATTERNS ==========
+    // Direct commands - create
     /^create\s+crew$/,
     /^create\s+crew\s+(.+)$/,
+    /^create\s+a\s+crew$/,
+    /^create\s+a\s+crew\s+(.+)$/,
+    /^create\s+new\s+crew$/,
+    /^create\s+new\s+crew\s+(.+)$/,
+    /^create\s+a\s+new\s+crew$/,
+    /^create\s+a\s+new\s+crew\s+(.+)$/,
+    
+    // Direct commands - new
     /^new\s+crew$/,
     /^new\s+crew\s+(.+)$/,
+    
+    // Direct commands - make
     /^make\s+crew$/,
     /^make\s+crew\s+(.+)$/,
+    /^make\s+a\s+crew$/,
+    /^make\s+a\s+crew\s+(.+)$/,
     
-    // Group variations
+    // Direct commands - start
+    /^start\s+crew$/,
+    /^start\s+crew\s+(.+)$/,
+    /^start\s+a\s+crew$/,
+    /^start\s+a\s+crew\s+(.+)$/,
+    /^start\s+new\s+crew$/,
+    /^start\s+new\s+crew\s+(.+)$/,
+    /^start\s+a\s+new\s+crew$/,
+    /^start\s+a\s+new\s+crew\s+(.+)$/,
+    
+    // ========== GROUP PATTERNS ==========
+    // Direct commands - create
     /^create\s+group$/,
     /^create\s+group\s+(.+)$/,
+    /^create\s+a\s+group$/,
+    /^create\s+a\s+group\s+(.+)$/,
+    /^create\s+new\s+group$/,
+    /^create\s+new\s+group\s+(.+)$/,
+    /^create\s+a\s+new\s+group$/,
+    /^create\s+a\s+new\s+group\s+(.+)$/,
+    
+    // Direct commands - new
     /^new\s+group$/,
     /^new\s+group\s+(.+)$/,
+    
+    // Direct commands - make
     /^make\s+group$/,
     /^make\s+group\s+(.+)$/,
+    /^make\s+a\s+group$/,
+    /^make\s+a\s+group\s+(.+)$/,
+    
+    // Direct commands - start
     /^start\s+group$/,
     /^start\s+group\s+(.+)$/,
     /^start\s+a\s+group$/,
     /^start\s+a\s+group\s+(.+)$/,
+    /^start\s+new\s+group$/,
+    /^start\s+new\s+group\s+(.+)$/,
+    /^start\s+a\s+new\s+group$/,
+    /^start\s+a\s+new\s+group\s+(.+)$/,
     
     // Natural language expressions
     /^i\s+want\s+to\s+create\s+(?:a\s+)?(?:new\s+)?(?:crew|group)$/,
@@ -303,11 +215,39 @@ function checkManageEventPattern(message: string): { isMatch: boolean, eventName
   
   // Check for simple patterns without event names
   const simplePatterns = [
+    // ========== EXISTING PATTERNS ==========
     /^manage\s+event$/,
     /^check\s+event$/,
     /^my\s+events$/,
     /^view\s+events$/,
-    /^events$/
+    /^events$/,
+    
+    // ========== NEW PATTERNS ==========
+    // Manage patterns
+    /^manage\s+events$/,              // "manage events"
+    
+    // Edit patterns
+    /^edit\s+event$/,                 // "edit event"
+    /^edit\s+my\s+event$/,            // "edit my event"
+    
+    // Update patterns
+    /^update\s+event$/,               // "update event"
+    
+    // Change patterns
+    /^change\s+event$/,               // "change event"
+    /^change\s+my\s+event$/,          // "change my event"
+    
+    // Check patterns
+    /^check\s+events$/,               // "check events"
+    /^check\s+my\s+events$/,          // "check my events"
+    
+    // Show patterns
+    /^show\s+my\s+events$/,           // "show my events"
+    /^show\s+upcoming\s+events$/,     // "show upcoming events"
+    
+    // See patterns
+    /^see\s+my\s+events$/,            // "see my events"
+    /^see\s+upcoming\s+events$/       // "see upcoming events"
   ];
   
   for (const pattern of simplePatterns) {
@@ -320,23 +260,43 @@ function checkManageEventPattern(message: string): { isMatch: boolean, eventName
 }
 
 // Check for SEND_MESSAGE patterns
-function checkSendMessagePattern(message: string): { isMatch: boolean } {
+function checkSendMessagePattern(message: string): { isMatch: boolean, crewName: string | null } {
   const normalizedMessage = message.toLowerCase().trim();
   const patterns = [
-    /^send\s+message$/,
-    /^message$/,
-    /^message\s+the\s+crew$/,
-    /^message\s+crew$/,
-    /^broadcast$/,
-    /^notify$/,
-    /^send\s+a?\s*reminder$/,
-    /^text\s+(crew|everyone)$/,
-    /^text\s+the\s+(crew|everyone)$/
+    // Patterns with crew name extraction (most specific)
+    { pattern: /^send\s+a?\s*message\s+to\s+(.+)$/, extractName: true },
+    { pattern: /^send\s+an?\s+update\s+to\s+(.+)$/, extractName: true },
+    { pattern: /^message\s+(?!my\s|this\s|the\s)(.+)$/, extractName: true },  // Negative lookahead to avoid "my crew"
+    
+    // "my crew" / "this crew" patterns (medium specific)
+    { pattern: /^send\s+a\s+message$/, extractName: false },
+    { pattern: /^send\s+message$/, extractName: false },
+    { pattern: /^message\s+my\s+crew$/, extractName: false },
+    { pattern: /^message\s+this\s+crew$/, extractName: false },
+    { pattern: /^text\s+my\s+crew$/, extractName: false },
+    { pattern: /^text\s+this\s+crew$/, extractName: false },
+    { pattern: /^send\s+a\s+group\s+text$/, extractName: false },
+    { pattern: /^send\s+an?\s+update\s+to\s+my\s+crew$/, extractName: false },
+    
+    // General patterns (keep existing, least specific)
+    { pattern: /^message$/, extractName: false },
+    { pattern: /^message\s+the\s+crew$/, extractName: false },
+    { pattern: /^message\s+crew$/, extractName: false },
+    { pattern: /^broadcast$/, extractName: false },
+    { pattern: /^notify$/, extractName: false },
+    { pattern: /^send\s+a?\s*reminder$/, extractName: false },
+    { pattern: /^text\s+(crew|everyone)$/, extractName: false },
+    { pattern: /^text\s+the\s+(crew|everyone)$/, extractName: false }
   ];
-  for (const pattern of patterns) {
-    if (normalizedMessage.match(pattern)) return { isMatch: true };
+  
+  for (const item of patterns) {
+    const match = normalizedMessage.match(item.pattern);
+    if (match) {
+      const crewName = item.extractName && match[1] ? match[1].trim() : null;
+      return { isMatch: true, crewName };
+    }
   }
-  return { isMatch: false };
+  return { isMatch: false, crewName: null };
 }
 
 
@@ -396,7 +356,21 @@ async function checkCheckCrewMembersPattern(message: string, supabase?: any, use
     
     // NEW: "show my crew" variations
     /^show\s+my\s+crew$/,
-    /^show\s+crew$/
+    /^show\s+crew$/,
+    
+    // ========== NEW PLURAL AND ALTERNATIVE TERM PATTERNS ==========
+    // Plural "crews" patterns
+    /^see\s+my\s+crews$/,           // "see my crews"
+    /^show\s+my\s+crews$/,          // "show my crews"
+    /^view\s+crews$/,               // "view crews"
+    /^list\s+my\s+crews$/,          // "list my crews"
+    /^list\s+crews$/,               // "list crews"
+    /^show\s+crews$/,               // "show crews"
+    /^check\s+my\s+crews$/,         // "check my crews"
+    
+    // Alternative terms (groups/teams)
+    /^show\s+my\s+groups$/,         // "show my groups"
+    /^show\s+teams$/                // "show teams"
   ];
   
   for (const pattern of checkCrewMembersPatterns) {
@@ -461,28 +435,53 @@ function checkSendInvitationsPattern(message: string): { isMatch: boolean, extra
   const normalizedMessage = message.toLowerCase().trim();
   
   const sendInvitationsPatterns = [
-    // Create event patterns
-    /^create\s+event$/,
+    // ========== CREATE EVENT PATTERNS ==========
+    // More specific patterns (with "for") MUST come before general patterns
     /^create\s+event\s+for\s+(.+)$/,
+    /^create\s+an?\s+event\s+for\s+(.+)$/,
+    /^create\s+a\s+new\s+event\s+for\s+(.+)$/,
+    /^new\s+event\s+for\s+(.+)$/,
+    /^create\s+event$/,
     /^create\s+event\s+(.+)$/,
+    /^create\s+an?\s+event$/,
+    /^create\s+a\s+new\s+event$/,
+    /^new\s+event$/,
     
-    // Send invitations patterns
+    // ========== SEND INVITATIONS PATTERNS ==========
+    // More specific patterns (with "for") MUST come before general patterns
+    /^send\s+invitations?\s+for\s+(.+)$/,
+    /^send\s+invites?\s+for\s+(.+)$/,
     /^send\s+invitations?$/,
     /^send\s+invitations?\s+(.+)$/,
     /^send\s+invites?$/,
     /^send\s+invites?\s+(.+)$/,
     
-    // Invite crew patterns
+    // ========== INVITE CREW PATTERNS ==========
     /^invite\s+crew$/,
     /^invite\s+crew\s+(.+)$/,
     
-    // Plan patterns
+    // ========== PLAN PATTERNS ==========
+    // More specific patterns (with "for") MUST come before general patterns
+    /^plan\s+an?\s+event\s+for\s+(.+)$/,
+    /^plan\s+a\s+new\s+event\s+for\s+(.+)$/,
     /^plan\s+event$/,
     /^plan\s+event\s+(.+)$/,
+    /^plan\s+an?\s+event$/,
+    /^plan\s+a\s+new\s+event$/,
     /^plan\s+something$/,
     /^plan\s+something\s+(.+)$/,
     
-    // Organize patterns
+    // ========== SCHEDULE PATTERNS ==========
+    // More specific patterns (with "for") MUST come before general patterns
+    /^schedule\s+an?\s+event\s+for\s+(.+)$/,
+    /^schedule\s+an?\s+event$/,
+    
+    // ========== SET UP PATTERNS ==========
+    // More specific patterns (with "for") MUST come before general patterns
+    /^set\s+up\s+an?\s+event\s+for\s+(.+)$/,
+    /^set\s+up\s+an?\s+event$/,
+    
+    // ========== ORGANIZE PATTERNS ==========
     /^organize\s+event$/,
     /^organize\s+event\s+(.+)$/,
     /^organize\s+something$/,
@@ -496,8 +495,12 @@ function checkSendInvitationsPattern(message: string): { isMatch: boolean, extra
         event_details: match[1] ? match[1].trim() : null
       };
       
-      // Check if this is a "create event for [crew_name]" or "create event [crew_name]" pattern
-      if (pattern.source.includes('create\\s+event\\s+for\\s+') || pattern.source.includes('create\\s+event\\s+(.+)$')) {
+      // Check if this pattern includes "for [crew_name]" at the end
+      // This catches all patterns like "create an event for", "plan a new event for", etc.
+      if (pattern.source.includes('for\\s+(.+)$')) {
+        extractedData.crew_name = match[1] ? match[1].trim() : null;
+      } else if (pattern.source.includes('create\\s+event\\s+(.+)$') && !pattern.source.includes('for')) {
+        // Legacy: "create event [crew_name]" without "for"
         extractedData.crew_name = match[1] ? match[1].trim() : null;
       }
       
@@ -520,6 +523,7 @@ function checkInviteMorePeoplePattern(message: string): { isMatch: boolean, even
   
   // Simple patterns without event names (check first)
   const inviteMorePeoplePatterns = [
+    // ========== EXISTING PATTERNS ==========
     /^invite\s+more$/,
     /^invite\s+more\s+people$/,
     /^add\s+more\s+people$/,
@@ -529,7 +533,12 @@ function checkInviteMorePeoplePattern(message: string): { isMatch: boolean, even
     /^expand\s+event$/,
     /^add\s+to\s+event$/,
     /^add\s+more\s+invites$/,
-    /^send\s+more\s+invitations?$/
+    /^send\s+more\s+invitations?$/,
+    
+    // ========== NEW PATTERNS ==========
+    /^add\s+more\s+guests$/,                        // "add more guests"
+    /^invite\s+more\s+guests$/,                     // "invite more guests"
+    /^invite\s+more\s+people\s+to\s+this\s+event$/  // "invite more people to this event"
   ];
   
   for (const pattern of inviteMorePeoplePatterns) {
@@ -540,6 +549,7 @@ function checkInviteMorePeoplePattern(message: string): { isMatch: boolean, even
   
   // Patterns with event names (check after simple patterns)
   const inviteMorePeopleWithEventPatterns = [
+    // ========== EXISTING PATTERNS ==========
     /^invite\s+more\s+people\s+to\s+(.+)$/,
     /^invite\s+more\s+people\s+(.+)$/,
     /^invite\s+more\s+(.+)$/,
@@ -551,7 +561,10 @@ function checkInviteMorePeoplePattern(message: string): { isMatch: boolean, even
     /^expand\s+event\s+(.+)$/,
     /^add\s+to\s+event\s+(.+)$/,
     /^add\s+more\s+invites\s+(.+)$/,
-    /^send\s+more\s+invitations?\s+(.+)$/
+    /^send\s+more\s+invitations?\s+(.+)$/,
+    
+    // ========== NEW PATTERNS ==========
+    /^invite\s+more\s+guests\s+to\s+(.+)$/  // "invite more guests to [event name]"
   ];
   
   // Check for patterns with event names
@@ -573,17 +586,37 @@ function checkSyncUpPattern(message: string): { isMatch: boolean, crewName: stri
   const normalizedMessage = message.toLowerCase().trim();
   
   const syncUpPatterns = [
+    // ========== PATTERNS WITH CREW NAME EXTRACTION (most specific first) ==========
+    /^sync\s+up\s+the\s+(.+)\s+crew$/, // "sync up the [crew name] crew"
+    /^sync\s+up\s+(.+)$/, // "sync up [crew name]"
+    
+    // ========== PATTERNS WITH SPECIFIC KEYWORDS ==========
+    /^sync\s+up\s+this\s+crew$/, // "sync up this crew"
+    /^sync\s+up\s+my\s+crew$/, // "sync up my crew"
+    /^find\s+times?\s+that\s+works?\s+for\s+this\s+crew$/, // "find time(s) that work(s) for this crew"
+    /^find\s+a\s+time\s+that\s+works?\s+for\s+everyone$/, // "find a time that works for everyone"
+    
+    // ========== GENERAL SYNC UP PATTERNS ==========
     /^sync\s*up$/,
     /^sync$/,
+    /^start\s+a\s+sync\s+up$/, // "start a sync up"
+    /^start\s+sync\s+up$/, // "start sync up"
+    /^run\s+a\s+sync\s+up$/, // "run a sync up"
+    /^do\s+a\s+sync\s+up$/, // "do a sync up"
+    
+    // ========== TIME/SCHEDULE PATTERNS ==========
     /^find\s+time$/,
+    /^find\s+a\s+time$/,
     /^schedule\s+time$/,
+    /^find\s+time\s+for/,
+    
+    // ========== COORDINATE PATTERNS ==========
     /^coordinate$/,
     /^coordinate\s+schedules?$/,
     /^coordinate\s+times?$/,
     /^when\s+can\s+we$/,
-    /^find\s+time\s+for/,
-    /^sync\s+up\s+(.+)$/, // "sync up [crew name]"
-    /^find\s+a\s+time$/,
+    
+    // ========== MEETING PATTERNS ==========
     /^schedule\s+a\s+meeting$/,
     /^plan\s+a\s+meeting$/,
     /^set\s+up\s+a\s+meeting$/,
@@ -737,6 +770,7 @@ function checkSyncUpDetailsInputPattern_DEPRECATED(message: string): { isMatch: 
 
 function checkSyncStatusPattern(message: string): { isMatch: boolean, eventName: string | null } {
   const patterns = [
+    // ========== EXISTING PATTERNS ==========
     /^sync\s+check(?:\s+(.+))?$/i,
     /^sync\s+status(?:\s+(.+))?$/i,
     /^sync\s+up\s+status(?:\s+(.+))?$/i,
@@ -745,7 +779,14 @@ function checkSyncStatusPattern(message: string): { isMatch: boolean, eventName:
     /^show\s+sync\s+up\s+status(?:\s+(.+))?$/i,
     /^display\s+sync\s+up\s+responses?(?:\s+(.+))?$/i,
     /^view\s+sync\s+up\s+responses?(?:\s+(.+))?$/i,
-    /^get\s+sync\s+up\s+responses?(?:\s+(.+))?$/i
+    /^get\s+sync\s+up\s+responses?(?:\s+(.+))?$/i,
+    
+    // ========== NEW PATTERNS (specific before general) ==========
+    /^check\s+sync\s+status(?:\s+(.+))?$/i,    // "check sync status [event name]" - SPECIFIC
+    /^check\s+sync-up(?:\s+(.+))?$/i,          // "check sync-up [event name]"
+    /^check\s+sync(?:\s+(.+))?$/i,             // "check sync [event name]" - GENERAL
+    /^see\s+sync\s+responses?(?:\s+(.+))?$/i,  // "see sync response(s) [event name]"
+    /^see\s+sync\s+results?(?:\s+(.+))?$/i     // "see sync result(s) [event name]"
   ];
   
   for (const pattern of patterns) {
@@ -757,6 +798,28 @@ function checkSyncStatusPattern(message: string): { isMatch: boolean, eventName:
   
   return { isMatch: false, eventName: null };
 }
+
+/**
+ * Extract the first number from user input, handling periods and other characters
+ * Examples: "1." -> 1, "1. " -> 1, "1" -> 1, "2." -> 2
+ * @param message - User input message
+ * @returns The extracted number, or null if no number found
+ */
+function extractNumberFromInput(message: string): number | null {
+  if (!message) return null;
+  
+  // Remove all non-numeric characters except digits, then extract first number
+  const cleaned = message.trim();
+  
+  // Match first sequence of digits (handles "1.", "1. ", "1", etc.)
+  const match = cleaned.match(/^\s*(\d+)/);
+  if (match && match[1]) {
+    return parseInt(match[1], 10);
+  }
+  
+  return null;
+}
+
 // Parse sync up details: "Event name, Location, Time1, Time2, Time3"
 // Parse time options for RE_SYNC (only time options, no event name/location)
 function parseReSyncTimeOptions(message: string): {
@@ -776,24 +839,47 @@ function parseReSyncTimeOptions(message: string): {
   
   // If comma splitting gives only 1 part, try to detect multiple date+time patterns
   if (commaSplitParts.length === 1) {
-    // Pattern to match complete time options: date + time (optional end time)
+    // Pattern 1: Numeric date format (existing)
     // Matches: "11/6 6pm", "11/8 6-8pm", "12/19 6:30pm", "11-6 10am-12pm"
-    // Date pattern: \d{1,2}[\/\-]\d{1,2} (e.g., 11/6, 11-6)
-    // Time pattern: \d{1,2}(?::\d{2})?\s*(?:am|pm)? (e.g., 6pm, 6:30pm)
-    // Optional end time: (?:\s*-\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?)? (e.g., -8pm, -8:30pm)
-    const timeOptionPattern = /\d{1,2}[\/\-]\d{1,2}\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s*-\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?/gi;
+    const numericDatePattern = /\d{1,2}[\/\-]\d{1,2}\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s*-\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?/gi;
     
+    // Pattern 2: Month name format
+    // Matches: "Dec 3 6-8pm", "December 3 6pm", "Dec3 6pm", "Dec 3 6pm-8pm"
+    const monthNamePattern = /\b(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|september|oct|october|nov|november|dec|december)\s*\d{1,2}\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s*-\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?/gi;
+    
+    // Find all matches from both patterns
     const matches: Array<{ start: number; end: number; text: string }> = [];
     let match;
     
-    // Find all matches
-    while ((match = timeOptionPattern.exec(message)) !== null) {
+    // Match numeric dates
+    while ((match = numericDatePattern.exec(message)) !== null) {
       matches.push({
         start: match.index,
         end: match.index + match[0].length,
         text: match[0].trim()
       });
     }
+    
+    // Match month names (reset regex lastIndex)
+    monthNamePattern.lastIndex = 0;
+    while ((match = monthNamePattern.exec(message)) !== null) {
+      // Check if this match overlaps with an existing match
+      const overlaps = matches.some(m => 
+        (match.index >= m.start && match.index < m.end) ||
+        (match.index + match[0].length > m.start && match.index + match[0].length <= m.end) ||
+        (match.index < m.start && match.index + match[0].length > m.end)
+      );
+      if (!overlaps) {
+        matches.push({
+          start: match.index,
+          end: match.index + match[0].length,
+          text: match[0].trim()
+        });
+      }
+    }
+    
+    // Sort matches by start position
+    matches.sort((a, b) => a.start - b.start);
     
     // If we found multiple matches, split by them
     if (matches.length > 1) {
@@ -802,8 +888,11 @@ function parseReSyncTimeOptions(message: string): {
         const matchText = matches[i].text;
         timeParts.push(matchText);
       }
+    } else if (matches.length === 1) {
+      // Single match found, use it
+      timeParts.push(matches[0].text);
     } else {
-      // Only one match or no matches, use the original single part
+      // No matches, use the original single part
       timeParts = commaSplitParts;
     }
   } else {
@@ -1592,6 +1681,20 @@ async function formatSyncUpConfirmation(syncUpData: any, supabaseClient: any): P
     }
   } catch (err) {
     console.log('WARN: crew member count failed, defaulting to 0', err);
+    try {
+      await logError({
+        supabase: supabaseClient,
+        userId: null,
+        workflowName: 'format_syncup_confirmation',
+        workflowStep: 'crew_member_count_error',
+        error: err,
+        metadata: {
+          crew_id: syncUpData?.crew_id
+        }
+      });
+    } catch (logErr) {
+      console.error('Failed to log error:', logErr);
+    }
   }
 
   // New format: Confirm: [Event Name] at [Location] for [Crew Name]
@@ -1699,6 +1802,22 @@ async function buildSyncUpRecipientList(supabase: any, syncUpId: string, targeti
     return [];
   } catch (error) {
     console.error('Error building sync up recipient list:', error);
+    try {
+      await logError({
+        supabase,
+        userId: null,
+        workflowName: 'build_syncup_recipient_list',
+        workflowStep: 'build_recipient_list_error',
+        error: error,
+        metadata: {
+          sync_up_id: syncUpId,
+          targeting_group: targetingGroup
+        },
+        syncUpId: syncUpId
+      });
+    } catch (logErr) {
+      console.error('Failed to log error:', logErr);
+    }
     return [];
   }
 }
@@ -1924,6 +2043,30 @@ async function validateCrewOwnership(supabase: any, crewId: string, userId: stri
   return { isValid: true, crew };
 }
 
+/**
+ * Resets a user's conversation state to idle with optional last action tracking
+ * Uses upsert to handle cases where conversation_state record doesn't exist
+ */
+async function resetConversationState(
+  supabase: any,
+  userId: string,
+  lastAction?: string
+): Promise<void> {
+  await supabase
+    .from('conversation_state')
+    .upsert({
+      user_id: userId,
+      current_state: 'idle',
+      waiting_for: null,
+      extracted_data: [],
+      last_action: lastAction || null,
+      last_action_timestamp: lastAction ? new Date().toISOString() : null,
+      updated_at: new Date().toISOString()
+    }, {
+      onConflict: 'user_id'
+    });
+}
+
 // Helper function to format crew members display
 function formatCrewMembersDisplay(crewName: string, members: any[], totalCount: number): string {
   if (totalCount === 0) {
@@ -2044,6 +2187,7 @@ async function showContactActionsMenu(supabase: any, userId: string, phone_numbe
   }
   
   const contactDisplay = await formatContactDisplay(contact);
+  const contactName = `${contact.first_name}${contact.last_name ? ' ' + contact.last_name : ''}`;
   
   let response = `${contactDisplay}\n\n`;
   response += `Edit Contact:\n`;
@@ -2064,7 +2208,7 @@ async function showContactActionsMenu(supabase: any, userId: string, phone_numbe
       extracted_data: [{
         action: 'EDIT_CONTACT',
         contact_id: contactId,
-        contact_name: `${contact.first_name}${contact.last_name ? ' ' + contact.last_name : ''}`,
+        contact_name: contactName,
         contact_phone: contact.phone_number,
         timestamp: new Date().toISOString()
       }]
@@ -2072,19 +2216,76 @@ async function showContactActionsMenu(supabase: any, userId: string, phone_numbe
       onConflict: 'user_id'
     });
   
+  // Log menu display
+  await logWorkflowProgress({
+    supabase,
+    userId,
+    workflowName: 'edit_contact',
+    workflowStep: 'contact_menu_displayed',
+    executionStatus: 'success',
+    metadata: {
+      contact_id: contactId,
+      contact_name: contactName,
+      contact_phone: contact.phone_number
+    }
+  });
+  
   await sendSMS(phone_number, response, send_sms, phone_number);
   return response;
 }
 
 // Helper function to show crew members and management menu
 async function showCrewMembersAndMenu(supabase: any, userId: string, phone_number: string, send_sms: boolean, crewId: string, crewName: string, phoneNumberForState: string): Promise<string> {
+  // Log function entry
+  logWorkflowProgress({
+    supabase,
+    userId,
+    workflowName: 'manage_crew',
+    workflowStep: 'show_menu_start',
+    executionStatus: 'success',
+    crewId: crewId,
+    metadata: {
+      crew_id: crewId,
+      crew_name: crewName
+    }
+  });
+  
   // Validate ownership first
   const ownership = await validateCrewOwnership(supabase, crewId, userId);
   if (!ownership.isValid) {
+    // Log ownership validation failure
+    logWorkflowProgress({
+      supabase,
+      userId,
+      workflowName: 'manage_crew',
+      workflowStep: 'show_menu_ownership_validation',
+      executionStatus: 'failure',
+      crewId: crewId,
+      metadata: {
+        crew_id: crewId,
+        crew_name: crewName,
+        error: 'permission_denied'
+      }
+    });
+    
     const errorMsg = 'You don\'t have permission to manage this crew.';
     await sendSMS(phone_number, errorMsg, send_sms, phone_number);
     return errorMsg;
   }
+  
+  // Log ownership validation success
+  logWorkflowProgress({
+    supabase,
+    userId,
+    workflowName: 'manage_crew',
+    workflowStep: 'show_menu_ownership_validation',
+    executionStatus: 'success',
+    crewId: crewId,
+    metadata: {
+      crew_id: crewId,
+      crew_name: crewName
+    }
+  });
   
   // Fetch latest crew name from database to ensure we have the current name
   const { data: crewData, error: crewError } = await supabase
@@ -2095,6 +2296,21 @@ async function showCrewMembersAndMenu(supabase: any, userId: string, phone_numbe
   
   if (crewError) {
     console.error('Error fetching crew name:', crewError);
+    
+    // Log crew data fetch error
+    logWorkflowProgress({
+      supabase,
+      userId,
+      workflowName: 'manage_crew',
+      workflowStep: 'show_menu_fetch_crew_data',
+      executionStatus: 'failure',
+      crewId: crewId,
+      metadata: {
+        crew_id: crewId,
+        error: crewError.message
+      }
+    });
+    
     const errorMsg = `Sorry, I couldn't fetch crew information. Please try again.`;
     await sendSMS(phone_number, errorMsg, send_sms, phone_number);
     return errorMsg;
@@ -2119,6 +2335,22 @@ async function showCrewMembersAndMenu(supabase: any, userId: string, phone_numbe
   
   if (membersError) {
     console.error('Error fetching crew members:', membersError);
+    
+    // Log member fetch error
+    logWorkflowProgress({
+      supabase,
+      userId,
+      workflowName: 'manage_crew',
+      workflowStep: 'show_menu_fetch_members',
+      executionStatus: 'failure',
+      crewId: crewId,
+      metadata: {
+        crew_id: crewId,
+        crew_name: currentCrewName,
+        error: membersError.message
+      }
+    });
+    
     const errorMsg = `Sorry, I couldn't fetch members for ${currentCrewName}. Please try again.`;
     await sendSMS(phone_number, errorMsg, send_sms, phone_number);
     return errorMsg;
@@ -2126,6 +2358,22 @@ async function showCrewMembersAndMenu(supabase: any, userId: string, phone_numbe
   
   const totalCount = allMembers?.length || 0;
   const membersToDisplay = allMembers?.slice(0, 5) || [];
+  
+  // Log member count
+  logWorkflowProgress({
+    supabase,
+    userId,
+    workflowName: 'manage_crew',
+    workflowStep: 'show_menu_member_count',
+    executionStatus: 'success',
+    crewId: crewId,
+    metadata: {
+      crew_id: crewId,
+      crew_name: currentCrewName,
+      total_members: totalCount,
+      displayed_members: membersToDisplay.length
+    }
+  });
   
   // Format member display
   const memberDisplay = formatCrewMembersDisplay(currentCrewName, membersToDisplay, totalCount);
@@ -2157,6 +2405,21 @@ async function showCrewMembersAndMenu(supabase: any, userId: string, phone_numbe
     }, {
       onConflict: 'user_id'
     });
+  
+  // Log menu displayed
+  logWorkflowProgress({
+    supabase,
+    userId,
+    workflowName: 'manage_crew',
+    workflowStep: 'menu_displayed',
+    executionStatus: 'success',
+    crewId: crewId,
+    metadata: {
+      crew_id: crewId,
+      crew_name: currentCrewName,
+      total_members: totalCount
+    }
+  });
   
   await sendSMS(phone_number, responseContent, send_sms, phone_number);
   return responseContent;
@@ -2237,6 +2500,21 @@ async function showEventDetailsAndMenu(supabase: any, userId: string, phone_numb
       onConflict: 'user_id'
     });
   
+  // Log event menu displayed
+  logWorkflowProgress({
+    supabase,
+    userId,
+    workflowName: 'manage_event',
+    workflowStep: 'event_menu_displayed',
+    executionStatus: 'success',
+    eventId: eventId,
+    metadata: {
+      event_id: eventId,
+      event_title: eventData.title,
+      rsvp_counts: rsvpCounts
+    }
+  });
+  
   return response;
 }
 
@@ -2272,15 +2550,36 @@ async function checkPatternMatches(message: string, currentState: any = null, is
     return { action: 'ONBOARDING', extractedData: {} };
   }
 
+  // Handle reset confirmation responses (HIGH PRIORITY - before other checks)
+  if (currentState?.waiting_for === 'reset_confirmation') {
+    if (normalizedMessage === 'yes' || normalizedMessage === 'y' || normalizedMessage === 'confirm') {
+      return {
+        action: 'RESET_CONFIRMATION_YES',
+        extractedData: {}
+      };
+    } else if (normalizedMessage === 'no' || normalizedMessage === 'n' || normalizedMessage === 'cancel') {
+      return {
+        action: 'RESET_CONFIRMATION_NO',
+        extractedData: {}
+      };
+    } else {
+      // Invalid input for reset confirmation
+      return {
+        action: 'RESET_CONFIRMATION_INVALID',
+        extractedData: { invalid_input: message.trim() }
+      };
+    }
+  }
+
   // ======================================================================
   // MANAGE_EVENT waiting_for handlers (HIGH PRIORITY - before other patterns)
   // ======================================================================
 
   // Handle event management menu selection (1-5)
   if (currentState?.waiting_for === 'event_management_menu') {
-    const numericMatch = message.trim().match(/^(\d+)$/);
-    if (numericMatch) {
-      const menuOption = parseInt(numericMatch[1]);
+    const number = extractNumberFromInput(message);
+    if (number !== null) {
+      const menuOption = number;
       if (menuOption >= 1 && menuOption <= 5) {
         return {
           action: 'EVENT_MANAGEMENT_MENU_SELECTION',
@@ -2300,9 +2599,9 @@ async function checkPatternMatches(message: string, currentState: any = null, is
 
   // Handle manage event selection with pagination
   if (currentState?.waiting_for === 'manage_event_selection') {
-    const numericMatch = message.trim().match(/^(\d+)$/);
-    if (numericMatch) {
-      const eventIndex = parseInt(numericMatch[1]) - 1;
+    const number = extractNumberFromInput(message);
+    if (number !== null) {
+      const eventIndex = number - 1;
       return {
         action: 'MANAGE_EVENT_SELECTION',
         extractedData: { event_index: eventIndex }
@@ -2499,9 +2798,9 @@ async function checkPatternMatches(message: string, currentState: any = null, is
   }
 
   if (currentState?.waiting_for === 'edit_contact_selection') {
-    const numericMatch = message.trim().match(/^(\d+)$/);
-    if (numericMatch) {
-      const contactIndex = parseInt(numericMatch[1]) - 1;
+    const number = extractNumberFromInput(message);
+    if (number !== null) {
+      const contactIndex = number - 1;
       return {
         action: 'EDIT_CONTACT_SELECTION',
         extractedData: { contact_index: contactIndex }
@@ -2519,9 +2818,9 @@ async function checkPatternMatches(message: string, currentState: any = null, is
   }
 
   if (currentState?.waiting_for === 'edit_contact_actions_menu') {
-    const numericMatch = message.trim().match(/^(\d+)$/);
-    if (numericMatch) {
-      const menuOption = parseInt(numericMatch[1]);
+    const number = extractNumberFromInput(message);
+    if (number !== null) {
+      const menuOption = number;
       if (menuOption >= 1 && menuOption <= 4) {
         return {
           action: 'EDIT_CONTACT_MENU_SELECTION',
@@ -2628,40 +2927,42 @@ async function checkPatternMatches(message: string, currentState: any = null, is
     };
   }
 
-  // Check EDIT_CONTACT patterns
-  // First check simple patterns that should match even with leading/trailing spaces
-  const trimmedMessage = message.trim();
-  if (/^edit contact$/i.test(trimmedMessage) || /^manage contact$/i.test(trimmedMessage)) {
-    return {
-      action: 'EDIT_CONTACT',
-      extractedData: {}
-    };
-  }
-  
-  // Then check patterns that extract names (use original message for better extraction)
-  const editContactPatterns = [
-    /^fix\s+(.+?)(?:'s)?\s+(?:number|phone|name)/i,  // "fix Tom's number", "fix Tom number"
-    /^change\s+(.+?)(?:'s)?\s+(?:number|phone|name)/i,  // "change Sarah's name", "change Tom number"
-    /^update\s+(.+?)(?:'s)?\s+contact/i,  // "update Tom's contact", "update Tom contact"
-    /^edit\s+(.+)$/i  // "edit Tom", "edit Sarah" (must be last to avoid conflicts)
-  ];
-
-  for (const pattern of editContactPatterns) {
-    const match = trimmedMessage.match(pattern);
-    if (match) {
-      // Extract name and clean up (original case preserved for better search)
-      const extractedName = match[1]?.trim();
-      // Don't treat "contact" as a name if it's the exact word after "edit"
-      if (extractedName && extractedName.toLowerCase() === 'contact') {
-        return {
-          action: 'EDIT_CONTACT',
-          extractedData: {}
-        };
-      }
+  // Check EDIT_CONTACT patterns (skip if in crew_management_menu state)
+  if (currentState?.waiting_for !== 'crew_management_menu') {
+    // First check simple patterns that should match even with leading/trailing spaces
+    const trimmedMessage = message.trim();
+    if (/^edit contact$/i.test(trimmedMessage) || /^manage contact$/i.test(trimmedMessage)) {
       return {
         action: 'EDIT_CONTACT',
-        extractedData: extractedName ? { search_query: extractedName } : {}
+        extractedData: {}
       };
+    }
+    
+    // Then check patterns that extract names (use original message for better extraction)
+    const editContactPatterns = [
+      /^fix\s+(.+?)(?:'s)?\s+(?:number|phone|name)/i,  // "fix Tom's number", "fix Tom number"
+      /^change\s+(.+?)(?:'s)?\s+(?:number|phone|name)/i,  // "change Sarah's name", "change Tom number"
+      /^update\s+(.+?)(?:'s)?\s+contact/i,  // "update Tom's contact", "update Tom contact"
+      /^edit\s+(.+)$/i  // "edit Tom", "edit Sarah" (must be last to avoid conflicts)
+    ];
+
+    for (const pattern of editContactPatterns) {
+      const match = trimmedMessage.match(pattern);
+      if (match) {
+        // Extract name and clean up (original case preserved for better search)
+        const extractedName = match[1]?.trim();
+        // Don't treat "contact" as a name if it's the exact word after "edit"
+        if (extractedName && extractedName.toLowerCase() === 'contact') {
+          return {
+            action: 'EDIT_CONTACT',
+            extractedData: {}
+          };
+        }
+        return {
+          action: 'EDIT_CONTACT',
+          extractedData: extractedName ? { search_query: extractedName } : {}
+        };
+      }
     }
   }
 
@@ -2819,9 +3120,9 @@ async function checkPatternMatches(message: string, currentState: any = null, is
   
   if (currentState?.waiting_for === 'event_selection_send_message') {
     // Step 3: Handle event selection
-    const numericMatch = message.trim().match(/^(\d+)$/);
-    if (numericMatch) {
-      const eventIndex = parseInt(numericMatch[1]) - 1;
+    const number = extractNumberFromInput(message);
+    if (number !== null) {
+      const eventIndex = number - 1;
       return { action: 'SEND_MESSAGE', extractedData: { event_index: eventIndex } };
     } else {
       return { action: 'SEND_MESSAGE', extractedData: { invalid_input: true } };
@@ -2830,9 +3131,9 @@ async function checkPatternMatches(message: string, currentState: any = null, is
   
   if (currentState?.waiting_for === 'sync_up_selection_send_message') {
     // Step 3: Handle sync up selection
-    const numericMatch = message.trim().match(/^(\d+)$/);
-    if (numericMatch) {
-      const syncUpIndex = parseInt(numericMatch[1]) - 1;
+    const number = extractNumberFromInput(message);
+    if (number !== null) {
+      const syncUpIndex = number - 1;
       return { action: 'SEND_MESSAGE', extractedData: { sync_up_index: syncUpIndex } };
     } else {
       return { action: 'SEND_MESSAGE', extractedData: { invalid_input: true } };
@@ -2841,9 +3142,9 @@ async function checkPatternMatches(message: string, currentState: any = null, is
   
   if (currentState?.waiting_for === 'targeting_selection') {
     // Step 4: Handle targeting selection
-    const numericMatch = message.trim().match(/^(\d+)$/);
-    if (numericMatch) {
-      const targetingIndex = parseInt(numericMatch[1]);
+    const number = extractNumberFromInput(message);
+    if (number !== null) {
+      const targetingIndex = number;
       return { action: 'SEND_MESSAGE', extractedData: { targeting_index: targetingIndex } };
     } else {
       return { action: 'SEND_MESSAGE', extractedData: { invalid_input: true } };
@@ -2852,9 +3153,9 @@ async function checkPatternMatches(message: string, currentState: any = null, is
   
   if (currentState?.waiting_for === 'targeting_selection_sync_up') {
     // Step 4: Handle sync up targeting selection
-    const numericMatch = message.trim().match(/^(\d+)$/);
-    if (numericMatch) {
-      const targetingIndex = parseInt(numericMatch[1]);
+    const number = extractNumberFromInput(message);
+    if (number !== null) {
+      const targetingIndex = number;
       return { action: 'SEND_MESSAGE', extractedData: { targeting_index: targetingIndex } };
     } else {
       return { action: 'SEND_MESSAGE', extractedData: { invalid_input: true } };
@@ -2902,7 +3203,10 @@ async function checkPatternMatches(message: string, currentState: any = null, is
   // Explicit SEND_MESSAGE commands should take priority over any waiting_for
   const sendMessageCmd = checkSendMessagePattern(message);
   if (sendMessageCmd.isMatch) {
-    return { action: 'SEND_MESSAGE', extractedData: {} };
+    return { 
+      action: 'SEND_MESSAGE', 
+      extractedData: { crewName: sendMessageCmd.crewName || null } 
+    };
   }
   
   // Explicit RE_SYNC commands should take priority over any waiting_for
@@ -2926,9 +3230,9 @@ async function checkPatternMatches(message: string, currentState: any = null, is
   
   // Handle SYNC_UP continuation based on waiting_for state
   if (currentState?.waiting_for === 'crew_selection_for_sync_up') {
-    const numericMatch = message.trim().match(/^(\d+)$/);
-    if (numericMatch) {
-      const crewIndex = parseInt(numericMatch[1]) - 1;
+    const number = extractNumberFromInput(message);
+    if (number !== null) {
+      const crewIndex = number - 1;
       return {
         action: 'CREW_SELECTION_SYNC_UP',
         extractedData: { crew_index: crewIndex }
@@ -2937,24 +3241,24 @@ async function checkPatternMatches(message: string, currentState: any = null, is
   }
 
   if (currentState?.waiting_for === 'sync_up_event_selection') {
-    const numericMatch = message.trim().match(/^(\d+)$/);
-    if (numericMatch) {
+    const number = extractNumberFromInput(message);
+    if (number !== null) {
       // Event selection requires looking up the event from extracted_data
       return {
         action: 'SYNC_UP_EVENT_SELECTION',
-        extractedData: { selection_number: parseInt(numericMatch[1]) }
+        extractedData: { selection_number: number }
       };
     }
   }
 
   if (currentState?.waiting_for === 'sync_status_selection') {
     console.log('🔍 sync_status_selection check: message=', message, 'waiting_for=', currentState.waiting_for);
-    const numericMatch = message.trim().match(/^(\d+)$/);
-    if (numericMatch) {
-      console.log('✅ Numeric match found for sync_status_selection:', numericMatch[1]);
+    const number = extractNumberFromInput(message);
+    if (number !== null) {
+      console.log('✅ Numeric match found for sync_status_selection:', number);
       return {
         action: 'SYNC_STATUS_SELECTION',
-        extractedData: { selection_number: parseInt(numericMatch[1]) }
+        extractedData: { selection_number: number }
       };
     } else {
       // Non-numeric input - return invalid selection error
@@ -2968,11 +3272,11 @@ async function checkPatternMatches(message: string, currentState: any = null, is
 
   // After status is displayed, handle option number selection
   if (currentState?.waiting_for === 'sync_status_option_selection') {
-    const numericMatch = message.trim().match(/^(\d+)$/);
-    if (numericMatch) {
+    const number = extractNumberFromInput(message);
+    if (number !== null) {
       return {
         action: 'SYNC_STATUS_OPTION_SELECTED',
-        extractedData: { option_number: parseInt(numericMatch[1]) }
+        extractedData: { option_number: number }
       };
     }
     
@@ -3174,11 +3478,11 @@ async function checkPatternMatches(message: string, currentState: any = null, is
 
   // Handle RE_SYNC continuation based on waiting_for state
   if (currentState?.waiting_for === 're_sync_selection') {
-    const numericMatch = message.trim().match(/^(\d+)$/);
-    if (numericMatch) {
+    const number = extractNumberFromInput(message);
+    if (number !== null) {
       return {
         action: 'RE_SYNC_SELECTION',
-        extractedData: { selection_number: parseInt(numericMatch[1]) }
+        extractedData: { selection_number: number }
       };
     } else {
       // Invalid input for RE_SYNC selection - provide context-specific error
@@ -3226,21 +3530,6 @@ async function checkPatternMatches(message: string, currentState: any = null, is
       };
     }
   }
-
-  if (currentState?.waiting_for === 'reset_confirmation') {
-    const normalizedMessage = message.toLowerCase().trim();
-    if (normalizedMessage === 'yes' || normalizedMessage === 'y' || normalizedMessage === 'confirm') {
-      return {
-        action: 'RESET_CONFIRMATION_YES',
-        extractedData: {}
-      };
-    } else if (normalizedMessage === 'no' || normalizedMessage === 'n' || normalizedMessage === 'cancel') {
-      return {
-        action: 'RESET_CONFIRMATION_NO',
-        extractedData: {}
-      };
-    }
-  }
   
   // Handle SEND_MESSAGE continuation based on waiting_for state
   if (currentState?.waiting_for === 'send_message_context') {
@@ -3260,9 +3549,9 @@ async function checkPatternMatches(message: string, currentState: any = null, is
   
   if (currentState?.waiting_for === 'event_selection_send_message') {
     // Step 3: Handle event selection
-    const numericMatch = message.trim().match(/^(\d+)$/);
-    if (numericMatch) {
-      const eventIndex = parseInt(numericMatch[1]) - 1;
+    const number = extractNumberFromInput(message);
+    if (number !== null) {
+      const eventIndex = number - 1;
       return { action: 'SEND_MESSAGE', extractedData: { event_index: eventIndex } };
     } else {
       return { action: 'SEND_MESSAGE', extractedData: { invalid_input: true } };
@@ -3271,9 +3560,9 @@ async function checkPatternMatches(message: string, currentState: any = null, is
   
   if (currentState?.waiting_for === 'sync_up_selection_send_message') {
     // Step 3: Handle sync up selection
-    const numericMatch = message.trim().match(/^(\d+)$/);
-    if (numericMatch) {
-      const syncUpIndex = parseInt(numericMatch[1]) - 1;
+    const number = extractNumberFromInput(message);
+    if (number !== null) {
+      const syncUpIndex = number - 1;
       return { action: 'SEND_MESSAGE', extractedData: { sync_up_index: syncUpIndex } };
     } else {
       return { action: 'SEND_MESSAGE', extractedData: { invalid_input: true } };
@@ -3282,9 +3571,9 @@ async function checkPatternMatches(message: string, currentState: any = null, is
   
   if (currentState?.waiting_for === 'targeting_selection') {
     // Step 4: Handle targeting selection
-    const numericMatch = message.trim().match(/^(\d+)$/);
-    if (numericMatch) {
-      const targetingIndex = parseInt(numericMatch[1]);
+    const number = extractNumberFromInput(message);
+    if (number !== null) {
+      const targetingIndex = number;
       return { action: 'SEND_MESSAGE', extractedData: { targeting_index: targetingIndex } };
     } else {
       return { action: 'SEND_MESSAGE', extractedData: { invalid_input: true } };
@@ -3314,7 +3603,21 @@ async function checkPatternMatches(message: string, currentState: any = null, is
         };
       }
     }
-    if (normalizedMessage === 'create event' || normalizedMessage === 'create event for') {
+    // Check for create event patterns (expanded to match all variations)
+    const createEventPatterns = [
+      'create event', 'create event for',
+      'create an event', 'create an event for', 'create a event', 'create a event for',
+      'create a new event', 'create a new event for',
+      'new event', 'new event for',
+      'plan an event', 'plan an event for', 'plan a event', 'plan a event for',
+      'plan a new event', 'plan a new event for',
+      'schedule an event', 'schedule an event for', 'schedule a event', 'schedule a event for',
+      'set up an event', 'set up an event for', 'set up a event', 'set up a event for',
+      'send invites', 'send invites for', 'send invite', 'send invite for',
+      'send invitations', 'send invitations for', 'send invitation', 'send invitation for'
+    ];
+    
+    if (createEventPatterns.includes(normalizedMessage)) {
       // Auto-select the current crew for event creation
       return {
         action: 'SEND_INVITATIONS_WITH_CURRENT_CREW',
@@ -3386,8 +3689,8 @@ async function checkPatternMatches(message: string, currentState: any = null, is
       }
       
       // Check for numeric input when no list is active (e.g., user types "2" after no search results)
-      const numericMatch = message.trim().match(/^(\d+)$/);
-      if (numericMatch) {
+      const number = extractNumberFromInput(message);
+      if (number !== null) {
         // Numeric input when no active list - return INVALID_MEMBER_ADDING_MODE
         return {
           action: 'INVALID_MEMBER_ADDING_MODE',
@@ -3495,8 +3798,8 @@ async function checkPatternMatches(message: string, currentState: any = null, is
       }
       
       // Check for numeric input when no list is active (e.g., user types "2" after no search results)
-      const numericMatch = message.trim().match(/^(\d+)$/);
-      if (numericMatch) {
+      const number = extractNumberFromInput(message);
+      if (number !== null) {
         // Numeric input when no active list - return INVALID_MEMBER_ADDING_MODE
         return {
           action: 'INVALID_MEMBER_ADDING_MODE',
@@ -3527,14 +3830,20 @@ async function checkPatternMatches(message: string, currentState: any = null, is
         action: 'CONFIRM_ADD_CONTACT',
         extractedData: {}
       };
-    } 
+    } else if (normalizedMessage === 'no' || normalizedMessage === 'n' || normalizedMessage === 'nope' || 
+               normalizedMessage === 'cancel') {
+      return {
+        action: 'CANCEL_ADD_CONTACT',
+        extractedData: {}
+      };
+    }
   }
   
   // Handle contact search selection (multiple matches)
   if (currentState?.waiting_for === 'contact_search_selection') {
-    const numericMatch = message.trim().match(/^(\d+)$/);
-    if (numericMatch) {
-      const selectionNumber = parseInt(numericMatch[1]);
+    const number = extractNumberFromInput(message);
+    if (number !== null) {
+      const selectionNumber = number;
       // Accept any positive number - handler will validate against actual contact list
       if (selectionNumber >= 1) {
         return {
@@ -3651,9 +3960,9 @@ async function checkPatternMatches(message: string, currentState: any = null, is
   }
   
          // Check for numeric crew selection (1, 2, 3, etc.)
-         const numericMatch = message.trim().match(/^(\d+)$/);
-         if (numericMatch && currentState?.waiting_for === 'crew_selection_for_members') {
-           const crewIndex = parseInt(numericMatch[1]) - 1;
+         const number = extractNumberFromInput(message);
+         if (number !== null && currentState?.waiting_for === 'crew_selection_for_members') {
+           const crewIndex = number - 1;
            return {
              action: 'CREW_SELECTION',
              extractedData: { crew_index: crewIndex }
@@ -3661,8 +3970,8 @@ async function checkPatternMatches(message: string, currentState: any = null, is
          }
          
          // Check for numeric crew selection for CHECK_CREW_MEMBERS (old state)
-         if (numericMatch && currentState?.waiting_for === 'crew_selection_for_check_members') {
-           const crewIndex = parseInt(numericMatch[1]) - 1;
+         if (number !== null && currentState?.waiting_for === 'crew_selection_for_check_members') {
+           const crewIndex = number - 1;
            return {
              action: 'CREW_SELECTION_CHECK_MEMBERS',
              extractedData: { crew_index: crewIndex }
@@ -3670,8 +3979,8 @@ async function checkPatternMatches(message: string, currentState: any = null, is
          }
          
          // Check for numeric crew selection for crew management (new paginated state)
-         if (numericMatch && currentState?.waiting_for === 'crew_selection_manage') {
-           const crewIndex = parseInt(numericMatch[1]) - 1;
+         if (number !== null && currentState?.waiting_for === 'crew_selection_manage') {
+           const crewIndex = number - 1;
            return {
              action: 'CREW_SELECTION_MANAGE',
              extractedData: { crew_index: crewIndex }
@@ -3712,8 +4021,8 @@ async function checkPatternMatches(message: string, currentState: any = null, is
          }
          
          // Check for menu selection (accept any number - handler will validate range)
-         if (numericMatch && currentState?.waiting_for === 'crew_management_menu') {
-           const menuOption = parseInt(numericMatch[1]);
+         if (number !== null && currentState?.waiting_for === 'crew_management_menu') {
+           const menuOption = number;
            if (menuOption >= 1) {
              return {
                action: 'CREW_MANAGEMENT_MENU_SELECTION',
@@ -3723,18 +4032,55 @@ async function checkPatternMatches(message: string, currentState: any = null, is
          }
          
          // Check for "done" in crew_management_menu state (return to menu)
-         if (currentState?.waiting_for === 'crew_management_menu') {
-           const normalizedMessage = message.toLowerCase().trim();
-           if (normalizedMessage === 'done') {
-             return {
-               action: 'CREW_CHECK_DONE',
-               extractedData: {}
-             };
-           }
-         }
-         
-         // Check for invalid input in crew_management_menu state (non-numeric input)
-         if (currentState?.waiting_for === 'crew_management_menu' && !numericMatch) {
+        if (currentState?.waiting_for === 'crew_management_menu') {
+          const normalizedMessage = message.toLowerCase().trim();
+          if (normalizedMessage === 'done') {
+            return {
+              action: 'CREW_CHECK_DONE',
+              extractedData: {}
+            };
+          }
+          
+          // NEW: Natural language patterns for crew management menu (ADDITION to numeric selection)
+          // Show Members patterns - return to crew list to re-select
+          const showMembersPatterns = [
+            /^who'?s\s+in\s+this\s+crew$/,
+            /^who\s+is\s+in\s+this\s+crew$/,
+            /^show\s+members$/,
+            /^show\s+crew\s+members$/,
+            /^see\s+crew\s+members$/,
+            /^view\s+members$/
+          ];
+          
+          for (const pattern of showMembersPatterns) {
+            if (pattern.test(normalizedMessage)) {
+              // Members are already shown in current menu, so trigger done/back action
+              return {
+                action: 'CREW_CHECK_DONE',
+                extractedData: {}
+              };
+            }
+          }
+          
+          // Rename Crew patterns - map to menu option 3
+          const renameCrewPatterns = [
+            /^rename\s+crew$/,
+            /^rename\s+this\s+crew$/,
+            /^change\s+crew\s+name$/
+          ];
+          
+          for (const pattern of renameCrewPatterns) {
+            if (pattern.test(normalizedMessage)) {
+              return {
+                action: 'CREW_MANAGEMENT_MENU_SELECTION',
+                extractedData: { menu_option: 3 }
+              };
+            }
+          }
+        }
+        
+        // Check for invalid input in crew_management_menu state (non-numeric input)
+         if (currentState?.waiting_for === 'crew_management_menu' && number === null) {
            const normalizedMessage = message.toLowerCase().trim();
            if (normalizedMessage !== 'exit' && normalizedMessage !== 'quit' && normalizedMessage !== 'stop' && normalizedMessage !== 'done') {
              return {
@@ -3839,8 +4185,8 @@ async function checkPatternMatches(message: string, currentState: any = null, is
          }
          
          // Check for numeric crew selection for SEND_INVITATIONS
-         if (numericMatch && currentState?.waiting_for === 'crew_selection_for_send_invitations') {
-           const crewIndex = parseInt(numericMatch[1]) - 1;
+         if (number !== null && currentState?.waiting_for === 'crew_selection_for_send_invitations') {
+           const crewIndex = number - 1;
            return {
              action: 'CREW_SELECTION_SEND_INVITATIONS',
              extractedData: { crew_index: crewIndex }
@@ -3848,8 +4194,8 @@ async function checkPatternMatches(message: string, currentState: any = null, is
          }
          
          // Check for numeric event selection
-         if (numericMatch && currentState?.waiting_for === 'event_selection') {
-           const eventIndex = parseInt(numericMatch[1]) - 1;
+         if (number !== null && currentState?.waiting_for === 'event_selection') {
+           const eventIndex = number - 1;
            return {
              action: 'EVENT_SELECTION',
              extractedData: { event_index: eventIndex }
@@ -3857,7 +4203,7 @@ async function checkPatternMatches(message: string, currentState: any = null, is
          }
          
          // Check for invalid input when waiting for event selection (non-numeric, negative, etc.)
-         if (currentState?.waiting_for === 'event_selection' && !numericMatch) {
+         if (currentState?.waiting_for === 'event_selection' && number === null) {
            return {
              action: 'INVALID_EVENT_SELECTION',
              extractedData: { invalid_input: message.trim() }
@@ -3961,8 +4307,9 @@ async function checkPatternMatches(message: string, currentState: any = null, is
          
         // Check for numeric event selection for INVITE_MORE_PEOPLE
         if (currentState?.waiting_for === 'invite_more_people_event_selection') {
-          if (numericMatch) {
-            const eventIndex = parseInt(numericMatch[1]) - 1;
+          const number = extractNumberFromInput(message);
+          if (number !== null) {
+            const eventIndex = number - 1;
             return {
               action: 'INVITE_MORE_PEOPLE_STEP_2',
               extractedData: { event_index: eventIndex }
@@ -4203,6 +4550,35 @@ async function handleOnboardingContinue(userId: string, extractedParams: any, su
         }
       }
       
+      // Log workflow start (now we have crewId)
+      await logWorkflowStart({
+        supabase,
+        userId,
+        workflowName: 'add_crew_members',
+        workflowStep: 'initiated',
+        crewId: crewId,
+        inputData: {
+          crew_members: crewMembers,
+          crew_name: crewName,
+          action: 'ADD_CREW_MEMBERS_ONBOARDING'
+        }
+      });
+      
+      // Log crew lookup from context
+      await logWorkflowProgress({
+        supabase,
+        userId,
+        workflowName: 'add_crew_members',
+        workflowStep: 'crew_lookup_from_context',
+        executionStatus: 'success',
+        crewId: crewId,
+        metadata: {
+          crew_id: crewId,
+          crew_name: crewName,
+          found: true
+        }
+      });
+      
       if (crewMembers.length > 0) {
         const addedMembers = [];
         
@@ -4285,12 +4661,68 @@ async function handleOnboardingContinue(userId: string, extractedParams: any, su
             });
             
             console.log('Successfully added crew member:', memberData.id);
+            
+            // Log member addition progress
+            await logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'add_crew_members',
+              workflowStep: 'member_added',
+              executionStatus: 'success',
+              crewId: crewId,
+              contactId: contactData.id,
+              metadata: {
+                crew_id: crewId,
+                member_id: memberData.id,
+                contact_id: contactData.id,
+                member_name: member.name,
+                member_phone: member.phone,
+                is_new_contact: !existingContact
+              }
+            });
           } catch (error) {
             console.error('Error processing member:', member, error);
+            try {
+              await logError({
+                supabase,
+                userId: userId,
+                workflowName: 'add_crew_members',
+                workflowStep: 'process_member_error',
+                error: error,
+                metadata: {
+                  member_name: member?.name,
+                  member_phone: member?.phone,
+                  crew_id: crewId
+                },
+                crewId: crewId
+              });
+            } catch (logErr) {
+              console.error('Failed to log error:', logErr);
+            }
           }
         }
         
         if (addedMembers.length > 0) {
+          // Log workflow completion
+          await logWorkflowComplete({
+            supabase,
+            userId,
+            workflowName: 'add_crew_members',
+            workflowStep: 'completed',
+            executionStatus: 'success',
+            crewId: crewId,
+            outputData: {
+              crew_id: crewId,
+              crew_name: crewName,
+              added_members_count: addedMembers.length,
+              added_members: addedMembers.map(m => ({
+                contact_id: m.contact_id,
+                member_id: m.member_id,
+                name: m.name
+              }))
+            }
+          });
+          
           // Update extracted_data with member addition
           const updatedExtractedData = Array.isArray(conversationStateData?.extracted_data) ? conversationStateData.extracted_data : [];
           updatedExtractedData.push({
@@ -4357,6 +4789,21 @@ async function handleOnboardingContinue(userId: string, extractedParams: any, su
     
   } catch (error) {
     console.error('Error in handleOnboardingContinue:', error);
+    try {
+      await logError({
+        supabase,
+        userId: userId,
+        workflowName: 'onboarding',
+        workflowStep: 'handle_onboarding_continue_error',
+        error: error,
+        metadata: {
+          phone_number: phoneNumber,
+          substep: substep
+        }
+      });
+    } catch (logErr) {
+      console.error('Failed to log error:', logErr);
+    }
     return {
       action: 'ONBOARDING_ERROR',
       content: 'An error occurred during onboarding. Please try again.',
@@ -4421,36 +4868,53 @@ async function formatSyncUpStatus(supabase: any, syncUp: any): Promise<string> {
           });
         }
       } else {
-        // No selected options (including legacy response_type = 'none'): treat as No Response
-        noResponse.push(contactName);
+        // Check if response_type is 'none' - this indicates user explicitly voted "none"
+        if (resp.response_type === 'none') {
+          noneResponses.push(contactName);
+        } else {
+          // No selected options and not a "none" response: treat as No Response
+          noResponse.push(contactName);
+        }
       }
     });
   }
   
-  // Display each option with numbering (only those with at least 1 response)
+  // Display each option with numbering (including those with 0 responses)
+  // Exclude the "None" option (idx = 0) from the numbered list as it's not a selectable time
   if (options && options.length > 0) {
     let displayIndex = 1;
     options.forEach((opt) => {
+      // Skip the "None" option (idx = 0) - it's displayed separately below
+      if (opt.idx === 0) return;
+      
       const names = responsesByOption.get(opt.id) || [];
       const count = names.length;
-      if (count === 0) return; // skip empty options
+      if (count === 0) {
+        // Show option with (0) and no names
+        status += `${displayIndex}. ${opt.option_text}: (0)\n`;
+      } else {
       const displayNames = count <= 3 ? names.join(', ') : `${names.slice(0, 3).join(', ')}...`;
       status += `${displayIndex}. ${opt.option_text}: ${displayNames} (${count})\n`;
+      }
       displayIndex += 1;
     });
   }
   
-  // Display "None" responses
-  if (noneResponses.length > 0) {
-    const displayNames = noneResponses.length <= 3 ? noneResponses.join(', ') : `${noneResponses.slice(0, 3).join(', ')}...`;
-    status += `None: ${displayNames} (${noneResponses.length})\n`;
-  }
+  // Display "None" responses (always show, even if 0)
+  const noneDisplayNames = noneResponses.length <= 3 && noneResponses.length > 0 
+    ? noneResponses.join(', ') 
+    : noneResponses.length > 3 
+      ? `${noneResponses.slice(0, 3).join(', ')}...` 
+      : '';
+  status += `None: ${noneDisplayNames}${noneDisplayNames ? ' ' : ''}(${noneResponses.length})\n`;
   
-  // Display no response
-  if (noResponse.length > 0) {
-    const displayNames = noResponse.length <= 3 ? noResponse.join(', ') : `${noResponse.slice(0, 3).join(', ')}...`;
-    status += `No Response: ${displayNames} (${noResponse.length})`;
-  }
+  // Display no response (always show, even if 0)
+  const noResponseDisplayNames = noResponse.length <= 3 && noResponse.length > 0
+    ? noResponse.join(', ')
+    : noResponse.length > 3
+      ? `${noResponse.slice(0, 3).join(', ')}...`
+      : '';
+  status += `No Response: ${noResponseDisplayNames}${noResponseDisplayNames ? ' ' : ''}(${noResponse.length})`;
   
   // Add interactive prompt
   status += `\n\nSend invites for one of these times? Reply with the option number, 'Re Sync' to send new time options, or 'exit'.`;
@@ -4519,20 +4983,54 @@ async function showUninvitedCrewMembers(supabase: any, event: any, userId: strin
     }
   } catch (error) {
     console.error('Error showing uninvited crew members:', error);
+    try {
+      await logError({
+        supabase,
+        userId,
+        workflowName: 'show_uninvited_members',
+        workflowStep: 'show_uninvited_members_error',
+        error: error,
+        metadata: {
+          event_id: event?.id,
+          phone_number: phoneNumber
+        },
+        eventId: event?.id
+      });
+    } catch (logErr) {
+      console.error('Failed to log error:', logErr);
+    }
     return 'Error: Failed to check crew members. Please try again.';
   }
 }
 // Check RSVPs for a specific event with enhanced display
 const checkRSVPsForEvent = async (supabase, eventId, userId, phoneNumber, send_sms) => {
   try {
+    logWorkflowStart({
+      supabase,
+      userId,
+      workflowName: 'check_rsvps',
+      workflowStep: 'rsvp_lookup_started',
+      eventId: eventId,
+      metadata: { event_id: eventId }
+    });
+
     // Get event details with shorten_event_url
     const { data: eventData, error: eventError } = await supabase
       .from('events')
-      .select('id, title, event_date, start_time, location, notes, status, shorten_event_url')
+      .select('id, title, event_date, start_time, end_time, location, notes, status, shorten_event_url')
       .eq('id', eventId)
       .single();
 
     if (eventError || !eventData) {
+      logWorkflowProgress({
+        supabase,
+        userId,
+        workflowName: 'check_rsvps',
+        workflowStep: 'event_not_found',
+        executionStatus: 'failure',
+        eventId: eventId,
+        metadata: { event_id: eventId }
+      });
       return 'Sorry, I couldn\'t find that event. Please try again.';
     }
 
@@ -4545,7 +5043,7 @@ const checkRSVPsForEvent = async (supabase, eventId, userId, phoneNumber, send_s
         response_note,
         created_at,
         contact_id,
-        contacts (
+        contacts!invitations_contact_id_fkey (
           first_name,
           last_name,
           phone_number
@@ -4571,24 +5069,69 @@ const checkRSVPsForEvent = async (supabase, eventId, userId, phoneNumber, send_s
       day: 'numeric',
       year: 'numeric'
     });
-    const formattedTime = eventDate.toLocaleTimeString('en-US', {
-      hour: 'numeric',
-      minute: '2-digit',
-      hour12: true
-    });
+    
+    // Format time range: "5:00-7:00pm" or just "5:00pm" if no end_time
+    let formattedTimeRange = '';
+    if (eventData.start_time) {
+      const startDate = new Date(`${eventData.event_date}T${eventData.start_time}`);
+      const startTime = startDate.toLocaleTimeString('en-US', {
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true
+      }).toLowerCase().replace(' ', '');
+      
+      if (eventData.end_time) {
+        const endDate = new Date(`${eventData.event_date}T${eventData.end_time}`);
+        const endTime = endDate.toLocaleTimeString('en-US', {
+          hour: 'numeric',
+          minute: '2-digit',
+          hour12: true
+        }).toLowerCase().replace(' ', '');
+        formattedTimeRange = `${startTime}-${endTime}`;
+      } else {
+        formattedTimeRange = startTime;
+      }
+    }
 
-    // Build single-line header: "[Event Name] - [Location], [Date], [Time]"
-    let rsvpResponse = `${eventData.title} - ${eventData.location || 'Location TBD'}, ${formattedDate}, ${formattedTime}\n`;
+    // Build single-line header: "[Event Title] - [Location], [Date], [Time Range]"
+    let rsvpResponse = `${eventData.title} - ${eventData.location || 'Location TBD'}, ${formattedDate}, ${formattedTimeRange}\n`;
 
     if (invitationsError) {
       console.error('Error fetching invitations:', invitationsError);
+      logWorkflowProgress({
+        supabase,
+        userId,
+        workflowName: 'check_rsvps',
+        workflowStep: 'invitations_fetch_failed',
+        executionStatus: 'failure',
+        eventId: eventId,
+        metadata: { event_id: eventId, error: invitationsError?.message }
+      });
       return 'Sorry, I couldn\'t fetch the RSVP data. Please try again.';
     } else if (!invitations || invitations.length === 0) {
       console.log('DEBUG: No invitations found for event');
+      logWorkflowProgress({
+        supabase,
+        userId,
+        workflowName: 'check_rsvps',
+        workflowStep: 'no_invitations_found',
+        executionStatus: 'success',
+        eventId: eventId,
+        metadata: { event_id: eventId }
+      });
       rsvpResponse += 'No invitations have been sent yet.\n\n';
       rsvpResponse += 'What would you like to do next?';
     } else {
       console.log('DEBUG: Processing invitations:', invitations.length, 'invitations found');
+      logWorkflowProgress({
+        supabase,
+        userId,
+        workflowName: 'check_rsvps',
+        workflowStep: 'invitations_found',
+        executionStatus: 'success',
+        eventId: eventId,
+        metadata: { event_id: eventId, invitations_count: invitations.length }
+      });
 
       // Debug: Log each invitation
       invitations.forEach((invitation, index) => {
@@ -4645,8 +5188,11 @@ const checkRSVPsForEvent = async (supabase, eventId, userId, phoneNumber, send_s
       });
 
       // Format categorized responses with 3-name limit + total count (no emojis)
+      // Always show category, even if count is 0
       const formatCategory = (category, label) => {
-        if (category.total === 0) return '';
+        if (category.total === 0) {
+          return `${label}: (0) `;
+        }
 
         const names = category.names.slice(0, 3).join(', ');
         const nameDisplay = category.total > 3 ? `${names}...` : names;
@@ -4654,18 +5200,47 @@ const checkRSVPsForEvent = async (supabase, eventId, userId, phoneNumber, send_s
         return `${label}: ${nameDisplay} (${category.total}) `;
       };
 
-      // Build RSVP Summary in single line format
-      rsvpResponse += 'RSVP Summary: ';
-      rsvpResponse += formatCategory(categorizedResponses.in, 'In');
-      rsvpResponse += formatCategory(categorizedResponses.out, 'Out');
-      rsvpResponse += formatCategory(categorizedResponses.maybe, 'Maybe');
-      rsvpResponse += formatCategory(categorizedResponses.no_response, 'No Response');
-      rsvpResponse = rsvpResponse.trim(); // Remove trailing space
-      rsvpResponse += '\n';
+      // Build RSVP Summary with line breaks
+      rsvpResponse += '\nRSVP Summary:\n';
+      rsvpResponse += formatCategory(categorizedResponses.in, 'In').trim() + '\n';
+      rsvpResponse += formatCategory(categorizedResponses.out, 'Out').trim() + '\n';
+      rsvpResponse += formatCategory(categorizedResponses.maybe, 'Maybe').trim() + '\n';
+      rsvpResponse += formatCategory(categorizedResponses.no_response, 'No Response').trim();
 
-      // Add full details link using shorten_event_url with fallback
-      const eventLink = formatEventLink(eventId, eventData.shorten_event_url);
-      rsvpResponse += `Full list: ${eventLink}`;
+      // Log RSVP categorization
+      logWorkflowProgress({
+        supabase,
+        userId,
+        workflowName: 'check_rsvps',
+        workflowStep: 'rsvp_categorized',
+        executionStatus: 'success',
+        eventId: eventId,
+        metadata: {
+          event_id: eventId,
+          in_count: categorizedResponses.in.total,
+          out_count: categorizedResponses.out.total,
+          maybe_count: categorizedResponses.maybe.total,
+          no_response_count: categorizedResponses.no_response.total
+        }
+      });
+
+      // Log RSVP summary displayed
+      logWorkflowProgress({
+        supabase,
+        userId,
+        workflowName: 'check_rsvps',
+        workflowStep: 'rsvp_summary_displayed',
+        executionStatus: 'success',
+        eventId: eventId,
+        metadata: {
+          event_id: eventId,
+          total_invitations: invitations.length,
+          in_count: categorizedResponses.in.total,
+          out_count: categorizedResponses.out.total,
+          maybe_count: categorizedResponses.maybe.total,
+          no_response_count: categorizedResponses.no_response.total
+        }
+      });
     }
 
     // Send SMS directly with RSVP response
@@ -4688,10 +5263,40 @@ const checkRSVPsForEvent = async (supabase, eventId, userId, phoneNumber, send_s
       .eq('user_id', userId);
 
     // Return the RSVP response content
+    logWorkflowComplete({
+      supabase,
+      userId,
+      workflowName: 'check_rsvps',
+      workflowStep: 'rsvp_display_completed',
+      executionStatus: 'success',
+      eventId: eventId,
+      metadata: { event_id: eventId }
+    });
     return rsvpResponse;
 
   } catch (error) {
     console.error('Error in checkRSVPsForEvent:', error);
+    logWorkflowError({
+      supabase,
+      userId,
+      workflowName: 'check_rsvps',
+      workflowStep: 'rsvp_lookup_started',
+      eventId: eventId,
+      metadata: { event_id: eventId, error: error?.message || String(error) }
+    });
+    try {
+      await logError({
+        supabase,
+        userId,
+        workflowName: 'check_rsvps',
+        workflowStep: 'check_rsvps_error',
+        error: error,
+        metadata: { event_id: eventId },
+        eventId: eventId
+      });
+    } catch (logErr) {
+      console.error('Failed to log error:', logErr);
+    }
     return 'Failed to check RSVPs. Please try again.';
   }
 };
@@ -4700,6 +5305,15 @@ const checkRSVPsForEvent = async (supabase, eventId, userId, phoneNumber, send_s
 const sendMessageForEvent = async (supabase, eventId, userId, phoneNumber, responseContent, shouldSendSMS) => {
   try {
     console.log('DEBUG: sendMessageForEvent called with eventId:', eventId);
+
+    logWorkflowProgress({
+      supabase,
+      userId,
+      workflowName: 'send_message',
+      workflowStep: 'event_lookup_started',
+      executionStatus: 'pending',
+      metadata: { event_id: eventId }
+    });
 
     // Get event details
     const { data: eventData, error: eventError } = await supabase
@@ -4711,6 +5325,15 @@ const sendMessageForEvent = async (supabase, eventId, userId, phoneNumber, respo
     console.log('DEBUG: Event query result:', { eventData, eventError });
 
     if (eventError || !eventData) {
+      logWorkflowProgress({
+        supabase,
+        userId,
+        workflowName: 'send_message',
+        workflowStep: 'event_not_found',
+        executionStatus: 'failure',
+        metadata: { event_id: eventId }
+      });
+      
       console.error('DEBUG: Event not found or error:', eventError);
       responseContent = 'Sorry, I couldn\'t find that event. Please try again.';
       shouldSendSMS = true;
@@ -4733,6 +5356,15 @@ const sendMessageForEvent = async (supabase, eventId, userId, phoneNumber, respo
     console.log('DEBUG: sendMessageForEvent - invitations query result:', { invitations, invitationsError });
 
     if (invitationsError) {
+      logWorkflowProgress({
+        supabase,
+        userId,
+        workflowName: 'send_message',
+        workflowStep: 'invitations_fetch_failed',
+        executionStatus: 'failure',
+        metadata: { event_id: eventId, error: invitationsError.message || 'Unknown error' }
+      });
+      
       console.error('Error fetching invitations:', invitationsError);
       responseContent = 'Sorry, I couldn\'t fetch the invitation data. Please try again.';
       shouldSendSMS = true;
@@ -4769,6 +5401,15 @@ const sendMessageForEvent = async (supabase, eventId, userId, phoneNumber, respo
     console.log('DEBUG: Valid invitations count:', validInvitations.length);
 
     if (validInvitations.length === 0) {
+      logWorkflowProgress({
+        supabase,
+        userId,
+        workflowName: 'send_message',
+        workflowStep: 'no_valid_invitations',
+        executionStatus: 'failure',
+        metadata: { event_id: eventId }
+      });
+      
       console.log('DEBUG: No valid invitations found');
       responseContent = 'No valid contacts found for this event. Please invite some people first.';
       shouldSendSMS = true;
@@ -4784,12 +5425,33 @@ const sendMessageForEvent = async (supabase, eventId, userId, phoneNumber, respo
       out: validInvitations.filter(inv => inv.response_note === 'out' || inv.response_note === 'no' || inv.response_note === '2').length
     };
 
+    logWorkflowProgress({
+      supabase,
+      userId,
+      workflowName: 'send_message',
+      workflowStep: 'targeting_options_calculated',
+      executionStatus: 'success',
+      metadata: {
+        event_id: eventId,
+        targeting_options: targetingOptionsData
+      }
+    });
+
     // Show targeting options (simplified phrasing as requested)
     const targetingOptions = `Who should we message?\n\n1) Everyone\n2) Non-responders\n3) Coming (In!)\n4) Maybe\n5) Can't come (Out)\n\nReply with the number.`;
 
     console.log('DEBUG: Setting targeting options, length:', targetingOptions.length);
     responseContent = targetingOptions;
     shouldSendSMS = true;
+
+    logWorkflowProgress({
+      supabase,
+      userId,
+      workflowName: 'send_message',
+      workflowStep: 'targeting_options_shown',
+      executionStatus: 'success',
+      metadata: { event_id: eventId }
+    });
 
     // Update conversation state for targeting selection
     console.log('DEBUG: Updating conversation state for targeting selection');
@@ -4832,6 +5494,27 @@ const sendMessageForEvent = async (supabase, eventId, userId, phoneNumber, respo
 
   } catch (error) {
     console.error('Error in sendMessageForEvent:', error);
+    logWorkflowError({
+      supabase,
+      userId,
+      workflowName: 'send_message',
+      workflowStep: 'event_lookup_started',
+      metadata: { event_id: eventId, error: error?.message || String(error) }
+    });
+    try {
+      await logError({
+        supabase,
+        userId,
+        workflowName: 'send_message',
+        workflowStep: 'send_message_error',
+        error: error,
+        metadata: { event_id: eventId },
+        eventId: eventId
+      });
+    } catch (logErr) {
+      console.error('Failed to log error:', logErr);
+    }
+    
     responseContent = 'Failed to process message targeting. Please try again.';
     shouldSendSMS = true;
     return { responseContent, shouldSendSMS, conversationStateData: null };
@@ -4884,13 +5567,49 @@ Deno.serve(async (req) => {
         }
       });
     }
+    
+    // Validate phone_number is provided
+    if (!phone_number) {
+      return new Response(JSON.stringify({
+        error: 'Phone number is required'
+      }), {
+        status: 400,
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json'
+        }
+      });
+    }
 
     // Create Supabase client
     const supabase = createClient(
       Deno.env.get('SUPABASE_URL'),
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
     );
-if (is_host === true) {   
+    
+    // Log SMS received event
+    logSMSReceived(supabase, phone_number, message).catch(error => {
+      console.error('Error logging SMS received:', error);
+      // Log the error in logging itself
+      logWorkflowAction({
+        supabase,
+        userId: null,
+        workflowName: 'sms_received',
+        workflowStep: 'log_sms_received_handler_error',
+        eventType: 'error',
+        executionStatus: 'failure',
+        errorDetails: {
+          error_type: 'LOG_SMS_RECEIVED_HANDLER_ERROR',
+          error_message: error.message || String(error)
+        },
+        metadata: {
+          phone_number: phone_number,
+          message_length: message?.length || 0
+        }
+      }).catch(logError => console.error('Error logging SMS received handler error:', logError));
+    });
+    
+if (is_host === true) {
     // Initialize userId and isOnboarded before pattern matching
     let userId = null;
     let isOnboarded = false;
@@ -5088,10 +5807,35 @@ if (is_host === true) {
       if (action === 'CREATE_CREW') {
         const crewName = extractedData.crew_name;
         
+        // Log flow started
+        logWorkflowStart({
+          supabase,
+          userId,
+          workflowName: 'create_crew',
+          workflowStep: 'initiated',
+          inputData: {
+            crew_name: crewName || null,
+            action: 'CREATE_CREW',
+            extracted_data: extractedData
+          }
+        });
+        
         if (!crewName) {
           responseContent = 'What should we name your crew?';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
+          
+          // Log flow step: ask for crew name
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'create_crew',
+            workflowStep: 'ask_crew_name',
+            executionStatus: 'pending',
+            metadata: {
+              waiting_for: 'crew_name_input'
+            }
+          });
           
           // Update conversation state to wait for crew name (use upsert to create if doesn't exist)
           console.log(`🔄 Updating conversation state for user ${userId} to wait for crew name`);
@@ -5127,6 +5871,19 @@ if (is_host === true) {
         
         // Validate crew name length and characters
         if (crewName.length < 2) {
+          // Log flow step: validate crew name (too short)
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'create_crew',
+            workflowStep: 'validate_crew_name',
+            executionStatus: 'pending',
+            metadata: {
+              validation_result: 'too_short',
+              crew_name_length: crewName.length
+            }
+          });
+          
           responseContent = 'Crew name must be at least 2 characters long. Please provide a valid crew name.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -5140,6 +5897,19 @@ if (is_host === true) {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
         } else if (crewName.length > 50) {
+          // Log flow step: validate crew name (too long)
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'create_crew',
+            workflowStep: 'validate_crew_name',
+            executionStatus: 'pending',
+            metadata: {
+              validation_result: 'too_long',
+              crew_name_length: crewName.length
+            }
+          });
+          
           responseContent = 'Crew name must be 50 characters or less. Please provide a shorter name.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -5153,6 +5923,19 @@ if (is_host === true) {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
         } else {
+          // Log flow step: create crew in database
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'create_crew',
+            workflowStep: 'create_crew_db',
+            executionStatus: 'pending',
+            metadata: {
+              crew_name: crewName,
+              creator_id: userId
+            }
+          });
+          
           // Create crew immediately (allow duplicate names)
           const { data: crewData, error: crewError } = await supabase
             .from('crews')
@@ -5172,6 +5955,18 @@ if (is_host === true) {
           if (crewError) {
             console.error('Error creating crew:', crewError);
             
+            // Log flow step: crew creation error
+            logWorkflowError({
+              supabase,
+              userId,
+              workflowName: 'create_crew',
+              workflowStep: 'crew_creation_error',
+              errorDetails: crewError,
+              metadata: {
+                crew_name: crewName
+              }
+            });
+            
             const responseContent = 'Failed to create crew. Please try again.';
             
             shouldSendSMS = true;
@@ -5187,6 +5982,20 @@ if (is_host === true) {
             });
           } else {
               console.log('Successfully created crew:', crewData.id);
+              
+              // Log flow step: wait for invite URL
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'create_crew',
+                workflowStep: 'wait_invite_url',
+                executionStatus: 'pending',
+                crewId: crewData.id,
+                metadata: {
+                  crew_id: crewData.id,
+                  retry_count: 0
+                }
+              });
               
               // Wait for invite URL generation
               let inviteUrl = null;
@@ -5208,6 +6017,21 @@ if (is_host === true) {
                 }
                 retryCount++;
               }
+              
+              // Log flow step: update conversation state
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'create_crew',
+                workflowStep: 'update_conversation_state',
+                executionStatus: 'pending',
+                crewId: crewData.id,
+                metadata: {
+                  waiting_for: 'member_adding_mode',
+                  crew_id: crewData.id,
+                  crew_name: crewName
+                }
+              });
               
               // Update conversation state to member adding mode
               await supabase
@@ -5233,6 +6057,37 @@ if (is_host === true) {
               responseContent = `${crewName} created!\n\nTo add members:\nType a name already in Funlet: Tom\nType a name and number for a new crew member: Tom 4155551234\nShare link for people to add themselves: ${inviteUrl || ''}\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
               shouldSendSMS = true;
               await sendSMS(phone_number, responseContent, send_sms, phone_number);
+              
+              // Log flow completed
+              logWorkflowComplete({
+                supabase,
+                userId,
+                workflowName: 'create_crew',
+                workflowStep: 'completed',
+                executionStatus: 'success',
+                crewId: crewData.id,
+                outputData: {
+                  crew_id: crewData.id,
+                  crew_name: crewName,
+                  invite_url: inviteUrl,
+                  success: true
+                }
+              });
+              
+              // Log crew created event
+              logCrewCreated({
+                supabase,
+                userId,
+                workflowName: 'create_crew',
+                workflowStep: 'crew_created',
+                executionStatus: 'success',
+                crewId: crewData.id,
+                outputData: {
+                  crew_id: crewData.id,
+                  crew_name: crewName,
+                  invite_url: inviteUrl
+                }
+              });
               
               return new Response(JSON.stringify({
                 success: true,
@@ -5302,24 +6157,61 @@ if (is_host === true) {
         console.log('CHECK_RSVPS detected via pattern matching, bypassing AI');
         
         try {
+          logWorkflowStart({
+            supabase,
+            userId,
+            workflowName: 'check_rsvps',
+            workflowStep: 'initiated',
+            metadata: {}
+          });
+
           const eventName = extractedData.event_name;
+          console.log('🔍 CHECK_RSVPS: Starting workflow', { userId, eventName });
           
-          // Get user's recent events
+          // Get user's recent events (upcoming only)
+          const today = new Date().toISOString().split('T')[0];
+          console.log('🔍 CHECK_RSVPS: Querying events', { userId, today, eventName });
           const { data: recentEvents, error: eventsError } = await supabase
             .from('events')
             .select('id, title, event_date, start_time, location, status')
             .eq('creator_id', userId)
             .eq('status', 'active')
-            .order('created_at', { ascending: false })
-            .limit(5);
+            .gte('event_date', today)
+            .order('event_date', { ascending: true })
+            .order('start_time', { ascending: true });
+
+          console.log('🔍 CHECK_RSVPS: Query result', { 
+            eventsCount: recentEvents?.length || 0, 
+            eventsError: eventsError?.message,
+            events: recentEvents?.map(e => ({ id: e.id, title: e.title, date: e.event_date }))
+          });
 
           if (eventsError) {
             console.error('Error fetching events:', eventsError);
+            logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'check_rsvps',
+              workflowStep: 'events_fetch_failed',
+              executionStatus: 'failure',
+              metadata: { error: eventsError?.message || String(eventsError) }
+            });
             responseContent = 'Sorry, I couldn\'t fetch your events. Please try again.';
             shouldSendSMS = true;
           } else if (recentEvents && recentEvents.length > 0) {
+            console.log('🔍 CHECK_RSVPS: Events found', { count: recentEvents.length, eventName });
             // If event name was provided, try to find a matching event
             if (eventName) {
+              console.log('🔍 CHECK_RSVPS: Event name provided, searching for match', { eventName });
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'check_rsvps',
+                workflowStep: 'event_name_specified',
+                executionStatus: 'success',
+                metadata: { event_name: eventName }
+              });
+
               const matchingEvent = recentEvents.find(event => 
                 event.title.toLowerCase().includes(eventName.toLowerCase()) ||
                 eventName.toLowerCase().includes(event.title.toLowerCase())
@@ -5327,6 +6219,15 @@ if (is_host === true) {
               
               if (matchingEvent) {
                 // Auto-select the matching event and show RSVP details
+                logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'check_rsvps',
+                  workflowStep: 'event_found_by_name',
+                  executionStatus: 'success',
+                  eventId: matchingEvent.id,
+                  metadata: { event_id: matchingEvent.id, event_title: matchingEvent.title }
+                });
                 responseContent = await checkRSVPsForEvent(supabase, matchingEvent.id, userId, phone_number, send_sms);
                 shouldSendSMS = true;
                 
@@ -5341,8 +6242,35 @@ if (is_host === true) {
                     last_action_timestamp: null
                   })
                   .eq('user_id', userId);
+
+                logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'check_rsvps',
+                  workflowStep: 'rsvp_details_displayed',
+                  executionStatus: 'success',
+                  eventId: matchingEvent.id,
+                  metadata: { event_id: matchingEvent.id, event_title: matchingEvent.title }
+                });
+                logWorkflowComplete({
+                  supabase,
+                  userId,
+                  workflowName: 'check_rsvps',
+                  workflowStep: 'completed',
+                  executionStatus: 'success',
+                  eventId: matchingEvent.id,
+                  metadata: { event_id: matchingEvent.id, event_title: matchingEvent.title }
+                });
               } else {
                 // Event name not found, show available events
+                logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'check_rsvps',
+                  workflowStep: 'event_not_found_by_name',
+                  executionStatus: 'success',
+                  metadata: { requested_event_name: eventName }
+                });
                 responseContent = `I couldn't find an event matching "${eventName}". Here are your events:\n\n`;
                 let eventsList = '';
                 recentEvents.forEach((event, index) => {
@@ -5358,6 +6286,15 @@ if (is_host === true) {
                 eventsList += '\nReply with the event number or \'exit\'';
                 responseContent += eventsList;
                 shouldSendSMS = true;
+
+                logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'check_rsvps',
+                  workflowStep: 'multiple_events_list_shown',
+                  executionStatus: 'success',
+                  metadata: { events_count: recentEvents.length }
+                });
 
                 // Update conversation state to wait for event selection
                 await supabase
@@ -5377,9 +6314,19 @@ if (is_host === true) {
               }
             } else {
               // No event name provided - check if only one event exists for auto-selection
+              console.log('🔍 CHECK_RSVPS: No event name provided, checking event count', { count: recentEvents.length });
               if (recentEvents.length === 1) {
                 // Auto-select the only event and show RSVP details
+                console.log('🔍 CHECK_RSVPS: Single event found, auto-selecting', { eventId: recentEvents[0].id, title: recentEvents[0].title });
                 const onlyEvent = recentEvents[0];
+                logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'check_rsvps',
+                  workflowStep: 'single_event_auto_selected',
+                  executionStatus: 'success',
+                  metadata: { event_id: onlyEvent.id, event_title: onlyEvent.title }
+                });
                 responseContent = await checkRSVPsForEvent(supabase, onlyEvent.id, userId, phone_number, send_sms);
                 shouldSendSMS = true;
 
@@ -5394,8 +6341,26 @@ if (is_host === true) {
                     last_action_timestamp: null
                   })
                   .eq('user_id', userId);
+
+                logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'check_rsvps',
+                  workflowStep: 'rsvp_details_displayed',
+                  executionStatus: 'success',
+                  metadata: { event_id: onlyEvent.id, event_title: onlyEvent.title }
+                });
+                logWorkflowComplete({
+                  supabase,
+                  userId,
+                  workflowName: 'check_rsvps',
+                  workflowStep: 'completed',
+                  executionStatus: 'success',
+                  metadata: { event_id: onlyEvent.id, event_title: onlyEvent.title }
+                });
               } else {
                 // Multiple events - show event list for selection
+                console.log('🔍 CHECK_RSVPS: Multiple events found, showing list', { count: recentEvents.length, events: recentEvents.map(e => ({ id: e.id, title: e.title })) });
                 let eventsList = 'Which event?\n\n';
                 recentEvents.forEach((event, index) => {
                   const eventDate = new Date(`${event.event_date}T${event.start_time || '00:00:00'}`);
@@ -5411,6 +6376,16 @@ if (is_host === true) {
 
                 responseContent = eventsList;
                 shouldSendSMS = true;
+                console.log('🔍 CHECK_RSVPS: Generated events list response', { responseLength: responseContent.length, eventCount: recentEvents.length });
+
+                logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'check_rsvps',
+                  workflowStep: 'multiple_events_list_shown',
+                  executionStatus: 'success',
+                  metadata: { events_count: recentEvents.length }
+                });
 
                 // Update conversation state to wait for event selection
                 await supabase
@@ -5430,10 +6405,20 @@ if (is_host === true) {
               }
             }
           } else {
+            console.log('🔍 CHECK_RSVPS: No events found', { userId });
+            logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'check_rsvps',
+              workflowStep: 'no_events_found',
+              executionStatus: 'success',
+              metadata: {}
+            });
             responseContent = 'No events found. Type \'Create Event\' to create your first event.';
             shouldSendSMS = true;
           }
           
+          console.log('🔍 CHECK_RSVPS: Final response', { responseLength: responseContent?.length, shouldSendSMS });
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
           
           return new Response(JSON.stringify({
@@ -5446,6 +6431,25 @@ if (is_host === true) {
           });
         } catch (error) {
           console.error('Error in CHECK_RSVPS pattern matching:', error);
+          logWorkflowError({
+            supabase,
+            userId,
+            workflowName: 'check_rsvps',
+            workflowStep: 'initiated',
+            metadata: { error: error?.message || String(error) }
+          });
+          try {
+            await logError({
+              supabase,
+              userId,
+              workflowName: 'check_rsvps',
+              workflowStep: 'check_rsvps_pattern_error',
+              error: error,
+              metadata: {}
+            });
+          } catch (logErr) {
+            console.error('Failed to log error:', logErr);
+          }
           responseContent = 'Failed to check RSVPs. Please try again.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -5462,6 +6466,19 @@ if (is_host === true) {
       } else if (action === 'MANAGE_EVENT') { //#Manage_Event - Manage your events
         console.log('MANAGE_EVENT detected via pattern matching');
         
+        // Log flow started
+        logWorkflowStart({
+          supabase,
+          userId,
+          workflowName: 'manage_event',
+          workflowStep: 'initiated',
+          inputData: {
+            event_name: extractedData?.event_name || null,
+            action: 'MANAGE_EVENT',
+            extracted_data: extractedData
+          }
+        });
+        
         try {
           const eventName = extractedData.event_name; // This should now preserve case from checkManageEventPattern
           
@@ -5476,11 +6493,50 @@ if (is_host === true) {
             .order('event_date', { ascending: true })
             .order('start_time', { ascending: true });
           
+          // Log fetch user events
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'fetch_user_events',
+            executionStatus: eventsError ? 'failure' : 'success',
+            metadata: {
+              event_count: userEvents?.length || 0,
+              has_event_name_search: !!eventName,
+              event_name_searched: eventName || null,
+              error: eventsError ? eventsError.message : null
+            }
+          });
+          
           if (eventsError) {
             console.error('Error fetching events:', eventsError);
             responseContent = 'Sorry, I couldn\'t fetch your events. Please try again.';
             shouldSendSMS = true;
+            
+            logWorkflowError({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'error',
+              errorDetails: {
+                error_message: eventsError.message,
+                error_code: eventsError.code,
+                step: 'fetch_user_events'
+              }
+            });
           } else if (!userEvents || userEvents.length === 0) {
+            // Log no events found
+            logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'no_events_found',
+              executionStatus: 'success',
+              metadata: {
+                suggested_action: 'CREATE_EVENT'
+              }
+            });
+            
             responseContent = 'No events found. Type \'Create Event\' to make your first event.';
             shouldSendSMS = true;
             
@@ -5495,17 +6551,71 @@ if (is_host === true) {
               .eq('user_id', userId);
           } else if (userEvents.length === 1) {
             // Auto-select the only event
-            responseContent = await showEventDetailsAndMenu(supabase, userId, phone_number, send_sms, userEvents[0].id, phone_number);
+            const singleEvent = userEvents[0];
+            
+            // Log auto-select single event
+            logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'auto_select_single_event',
+              executionStatus: 'success',
+              eventId: singleEvent.id,
+              metadata: {
+                event_id: singleEvent.id,
+                event_title: singleEvent.title,
+                event_date: singleEvent.event_date
+              }
+            });
+            
+            responseContent = await showEventDetailsAndMenu(supabase, userId, phone_number, send_sms, singleEvent.id, phone_number);
             shouldSendSMS = true;
           } else if (eventName) {
             // Find all events matching the name (case-insensitive comparison)
-            const matchingEvents = userEvents.filter(e => 
+            const exactMatches = userEvents.filter(e => 
               e.title.toLowerCase() === eventName.toLowerCase()
             );
+            const partialMatches = userEvents.filter(e => 
+              e.title.toLowerCase().includes(eventName.toLowerCase()) && 
+              !exactMatches.some(ex => ex.id === e.id)
+            );
+            const matchingEvents = [...exactMatches, ...partialMatches];
+            
+            // Log event name search
+            logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'event_name_search',
+              executionStatus: 'success',
+              metadata: {
+                event_name_searched: eventName,
+                exact_matches_count: exactMatches.length,
+                partial_matches_count: partialMatches.length,
+                total_matches: matchingEvents.length
+              }
+            });
             
             if (matchingEvents.length === 1) {
               // Only one match - auto-select it
-              responseContent = await showEventDetailsAndMenu(supabase, userId, phone_number, send_sms, matchingEvents[0].id, phone_number);
+              const selectedEvent = matchingEvents[0];
+              
+              // Log single match found
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'manage_event',
+                workflowStep: 'single_match_found',
+                executionStatus: 'success',
+                eventId: selectedEvent.id,
+                metadata: {
+                  event_id: selectedEvent.id,
+                  event_title: selectedEvent.title,
+                  match_type: exactMatches.length > 0 ? 'exact' : 'partial'
+                }
+              });
+              
+              responseContent = await showEventDetailsAndMenu(supabase, userId, phone_number, send_sms, selectedEvent.id, phone_number);
               shouldSendSMS = true;
             } else if (matchingEvents.length >= 2) {
               // Multiple matches - show list of matching events
@@ -5513,6 +6623,20 @@ if (is_host === true) {
               const pageSize = 5;
               const totalEvents = matchingEvents.length;
               const eventsOnPage = matchingEvents.slice(page * pageSize, (page + 1) * pageSize);
+              
+              // Log multiple matches found
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'manage_event',
+                workflowStep: 'multiple_matches_found',
+                executionStatus: 'success',
+                metadata: {
+                  total_matches: totalEvents,
+                  showing_count: eventsOnPage.length,
+                  current_page: page
+                }
+              });
               
               // Use original eventName from user input (preserve case)
               let eventList = `Found ${totalEvents} event${totalEvents === 1 ? '' : 's'} named "${eventName}".\n\nWhich one would you like to manage?\n\n`;
@@ -5546,16 +6670,33 @@ if (is_host === true) {
               
               // Only show pagination actions if available
               if (hasMore && hasPrevious) {
-                eventList += ', \'Next\' or \'N\' for the next 5, \'Prev\' or \'P\' for the previous 5';
+                eventList += ', \'Next\' for the next 5, \'Prev\' for the previous 5';
               } else if (hasMore) {
-                eventList += ', \'Next\' or \'N\' for the next 5';
+                eventList += ', \'Next\' for the next 5';
               } else if (hasPrevious) {
-                eventList += ', \'Prev\' or \'P\' for the previous 5';
+                eventList += ', \'Prev\' for the previous 5';
               }
-              eventList += ', \'Done\' or \'D\' to return to menu, or \'exit\'.';
+              eventList += ', \'Done\' to return to menu, or \'exit\'.';
               
               responseContent = eventList;
               shouldSendSMS = true;
+              
+              // Log show event list
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'manage_event',
+                workflowStep: 'show_event_list',
+                executionStatus: 'success',
+                metadata: {
+                  total_events: totalEvents,
+                  showing_count: eventsOnPage.length,
+                  current_page: page,
+                  has_more: hasMore,
+                  has_previous: hasPrevious,
+                  search_context: 'name_search_multiple_matches'
+                }
+              });
               
               // Save state with pagination
               await supabase
@@ -5576,6 +6717,19 @@ if (is_host === true) {
                 });
             } else {
               // No exact match - show paginated list
+              // Log event not found by name
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'manage_event',
+                workflowStep: 'event_not_found_by_name',
+                executionStatus: 'failure',
+                metadata: {
+                  event_name_searched: eventName,
+                  error: 'event_not_found'
+                }
+              });
+              
               const page = 0;
               const pageSize = 5;
               const totalEvents = userEvents.length;
@@ -5612,16 +6766,33 @@ if (is_host === true) {
               
               // Only show pagination actions if available
               if (hasMore && hasPrevious) {
-                eventList += ', \'Next\' or \'N\' for the next 5, \'Prev\' or \'P\' for the previous 5';
+                eventList += ', \'Next\' for the next 5, \'Prev\' for the previous 5';
               } else if (hasMore) {
-                eventList += ', \'Next\' or \'N\' for the next 5';
+                eventList += ', \'Next\' for the next 5';
               } else if (hasPrevious) {
-                eventList += ', \'Prev\' or \'P\' for the previous 5';
+                eventList += ', \'Prev\' for the previous 5';
               }
-              eventList += ', \'Done\' or \'D\' to return to menu, or \'exit\'.';
+              eventList += ', \'Done\' to return to menu, or \'exit\'.';
               
               responseContent = eventList;
               shouldSendSMS = true;
+              
+              // Log show event list
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'manage_event',
+                workflowStep: 'show_event_list',
+                executionStatus: 'success',
+                metadata: {
+                  total_events: totalEvents,
+                  showing_count: eventsOnPage.length,
+                  current_page: page,
+                  has_more: hasMore,
+                  has_previous: hasPrevious,
+                  search_context: 'name_search_no_match'
+                }
+              });
               
               // Save state with pagination
               await supabase
@@ -5677,6 +6848,23 @@ if (is_host === true) {
             responseContent = eventList;
             shouldSendSMS = true;
             
+            // Log show event list
+            logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'show_event_list',
+              executionStatus: 'success',
+              metadata: {
+                total_events: totalEvents,
+                showing_count: eventsOnPage.length,
+                current_page: page,
+                has_more: hasMore,
+                has_previous: false,
+                search_context: 'no_name_provided'
+              }
+            });
+            
             // Save state with pagination
             await supabase
               .from('conversation_state')
@@ -5708,6 +6896,31 @@ if (is_host === true) {
           });
         } catch (error) {
           console.error('Error in MANAGE_EVENT:', error);
+          
+          logWorkflowError({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'error',
+            errorDetails: {
+              error_message: error instanceof Error ? error.message : String(error),
+              step: 'MANAGE_EVENT',
+              action: 'MANAGE_EVENT'
+            }
+          });
+          try {
+            await logError({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'manage_event_error',
+              error: error,
+              metadata: { step: 'MANAGE_EVENT' }
+            });
+          } catch (logErr) {
+            console.error('Failed to log error:', logErr);
+          }
+          
           responseContent = 'Failed to manage event. Please try again.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -5740,15 +6953,15 @@ if (is_host === true) {
             const hasMore = eventList.length > (currentPage + 1) * pageSize;
             const hasPrevious = currentPage > 0;
             if (hasMore && hasPrevious) {
-              responseContent = 'I didn\'t understand that. Reply with a number (1–5), \'Next\' or \'N\', \'Prev\' or \'P\', \'Done\' or \'D\', or \'exit\'.';
+              responseContent = 'I didn\'t understand that. Reply with a number (1–5), \'Next\', \'Prev\', \'Done\', or \'exit\'.';
             } else if (hasMore) {
-              responseContent = 'I didn\'t understand that. Reply with a number (1–5), \'Next\' or \'N\', \'Done\' or \'D\', or \'exit\'.';
+              responseContent = 'I didn\'t understand that. Reply with a number (1–5), \'Next\', \'Done\', or \'exit\'.';
             } else if (hasPrevious) {
               const eventsOnPage = eventList.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
-              responseContent = `I didn't understand that. Reply with a number (1–${eventsOnPage.length}), 'Prev' or 'P', 'Done' or 'D', or 'exit'.`;
+              responseContent = `I didn't understand that. Reply with a number (1–${eventsOnPage.length}), 'Prev', 'Done', or 'exit'.`;
             } else {
               const eventsOnPage = eventList.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
-              responseContent = `I didn't understand that. Reply with a number (1–${eventsOnPage.length}), 'Done' or 'D', or 'exit'.`;
+              responseContent = `I didn't understand that. Reply with a number (1–${eventsOnPage.length}), 'Done', or 'exit'.`;
             }
             shouldSendSMS = true;
             await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -5764,8 +6977,26 @@ if (is_host === true) {
           
           const selectedEvent = eventList[actualIndex];
           
+          // Log event selected
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'event_selected',
+            executionStatus: 'success',
+            metadata: {
+              event_id: selectedEvent.id,
+              event_title: selectedEvent.title,
+              event_index: eventIndex,
+              actual_index: actualIndex,
+              current_page: currentPage
+            }
+          });
+          
           // Show event details and menu
           responseContent = await showEventDetailsAndMenu(supabase, userId, phone_number, send_sms, selectedEvent.id, phone_number);
+          
+          // Log event menu displayed (RSVP counts will be logged in showEventDetailsAndMenu)
           
           return new Response(JSON.stringify({
             success: true,
@@ -5777,6 +7008,31 @@ if (is_host === true) {
           });
         } catch (error) {
           console.error('Error in MANAGE_EVENT_SELECTION:', error);
+          
+          logWorkflowError({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'error',
+            errorDetails: {
+              error_message: error instanceof Error ? error.message : String(error),
+              step: 'MANAGE_EVENT_SELECTION',
+              action: 'MANAGE_EVENT_SELECTION'
+            }
+          });
+          try {
+            await logError({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'manage_event_selection_error',
+              error: error,
+              metadata: { step: 'MANAGE_EVENT_SELECTION' }
+            });
+          } catch (logErr) {
+            console.error('Failed to log error:', logErr);
+          }
+          
           responseContent = 'Failed to select event. Please try again.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -5799,6 +7055,20 @@ if (is_host === true) {
           const pageSize = 5;
           const totalEvents = eventList.length;
           const newPage = currentPage + 1;
+          
+          // Log pagination next
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'pagination_next',
+            executionStatus: 'success',
+            metadata: {
+              current_page: currentPage,
+              new_page: newPage,
+              total_events: totalEvents
+            }
+          });
           
           // Check if there are more events
           if (newPage * pageSize >= totalEvents) {
@@ -5848,13 +7118,13 @@ if (is_host === true) {
           
           // Only show pagination actions if available
           if (hasMore && hasPrevious) {
-            eventListText += ', \'Next\' or \'N\' for the next 5, \'Prev\' or \'P\' for the previous 5';
+            eventListText += ', \'Next\' for the next 5, \'Prev\' for the previous 5';
           } else if (hasMore) {
-            eventListText += ', \'Next\' or \'N\' for the next 5';
+            eventListText += ', \'Next\' for the next 5';
           } else if (hasPrevious) {
-            eventListText += ', \'Prev\' or \'P\' for the previous 5';
+            eventListText += ', \'Prev\' for the previous 5';
           }
-          eventListText += ', \'Done\' or \'D\' to return to menu, or \'exit\'.';
+          eventListText += ', \'Done\' to return to menu, or \'exit\'.';
           
           responseContent = eventListText;
           shouldSendSMS = true;
@@ -5883,6 +7153,31 @@ if (is_host === true) {
           });
         } catch (error) {
           console.error('Error in MANAGE_EVENT_MORE:', error);
+          
+          logWorkflowError({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'error',
+            errorDetails: {
+              error_message: error instanceof Error ? error.message : String(error),
+              step: 'MANAGE_EVENT_MORE',
+              action: 'MANAGE_EVENT_MORE'
+            }
+          });
+          try {
+            await logError({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'manage_event_more_error',
+              error: error,
+              metadata: { step: 'MANAGE_EVENT_MORE' }
+            });
+          } catch (logErr) {
+            console.error('Failed to log error:', logErr);
+          }
+          
           responseContent = 'Failed to load more events. Please try again.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -5905,6 +7200,20 @@ if (is_host === true) {
           const pageSize = 5;
           const totalEvents = eventList.length;
           const newPage = currentPage - 1;
+          
+          // Log pagination previous
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'pagination_previous',
+            executionStatus: 'success',
+            metadata: {
+              current_page: currentPage,
+              new_page: newPage,
+              total_events: totalEvents
+            }
+          });
           
           // Check if we can go back
           if (newPage < 0) {
@@ -5954,13 +7263,13 @@ if (is_host === true) {
           
           // Only show pagination actions if available
           if (hasMore && hasPrevious) {
-            eventListText += ', \'Next\' or \'N\' for the next 5, \'Prev\' or \'P\' for the previous 5';
+            eventListText += ', \'Next\' for the next 5, \'Prev\' for the previous 5';
           } else if (hasMore) {
-            eventListText += ', \'Next\' or \'N\' for the next 5';
+            eventListText += ', \'Next\' for the next 5';
           } else if (hasPrevious) {
-            eventListText += ', \'Prev\' or \'P\' for the previous 5';
+            eventListText += ', \'Prev\' for the previous 5';
           }
-          eventListText += ', \'Done\' or \'D\' to return to menu, or \'exit\'.';
+          eventListText += ', \'Done\' to return to menu, or \'exit\'.';
           
           responseContent = eventListText;
           shouldSendSMS = true;
@@ -5989,6 +7298,19 @@ if (is_host === true) {
           });
         } catch (error) {
           console.error('Error in MANAGE_EVENT_BACK:', error);
+          
+          logWorkflowError({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'error',
+            errorDetails: {
+              error_message: error instanceof Error ? error.message : String(error),
+              step: 'MANAGE_EVENT_BACK',
+              action: 'MANAGE_EVENT_BACK'
+            }
+          });
+          
           responseContent = 'Failed to go back. Please try again.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6005,6 +7327,20 @@ if (is_host === true) {
         console.log('MANAGE_EVENT_DONE detected via pattern matching');
         
         try {
+          const currentPage = conversationState?.extracted_data?.[0]?.current_page || 0;
+          
+          // Log pagination done
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'pagination_done',
+            executionStatus: 'success',
+            metadata: {
+              final_page: currentPage
+            }
+          });
+          
           // Return to main menu by clearing the event selection state
           // This effectively ends the MANAGE_EVENT flow and returns to normal state
           responseContent = 'What would you like to do next?';
@@ -6033,6 +7369,19 @@ if (is_host === true) {
           });
         } catch (error) {
           console.error('Error in MANAGE_EVENT_DONE:', error);
+          
+          logWorkflowError({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'error',
+            errorDetails: {
+              error_message: error instanceof Error ? error.message : String(error),
+              step: 'MANAGE_EVENT_DONE',
+              action: 'MANAGE_EVENT_DONE'
+            }
+          });
+          
           responseContent = 'Failed to return to menu. Please try again.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6055,6 +7404,22 @@ if (is_host === true) {
           
           // Validate menu option range (1-5)
           if (menuOption < 1 || menuOption > 5) {
+            // Log invalid menu option
+            logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'menu_option_invalid',
+              executionStatus: 'failure',
+              eventId: eventId,
+              metadata: {
+                menu_option: menuOption,
+                event_id: eventId,
+                event_title: eventTitle,
+                error: 'invalid_option'
+              }
+            });
+            
             // Invalid selection - show error message only (don't re-display menu)
             responseContent = 'I didn\'t understand that. Reply with a number (1–5), or type \'exit\'.';
             shouldSendSMS = true;
@@ -6069,8 +7434,37 @@ if (is_host === true) {
             });
           }
           
+          // Log menu option selected
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'menu_option_selected',
+            executionStatus: 'success',
+            eventId: eventId,
+            metadata: {
+              menu_option: menuOption,
+              event_id: eventId,
+              event_title: eventTitle
+            }
+          });
+          
           if (menuOption === 1) {
             // Edit Event Details
+            // Log edit initiated
+            logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'edit_initiated',
+              executionStatus: 'success',
+              eventId: eventId,
+              metadata: {
+                event_id: eventId,
+                event_title: eventTitle
+              }
+            });
+            
             responseContent = `What would you like to change? (name/date/time/location/notes)`;
             shouldSendSMS = true;
             
@@ -6100,6 +7494,20 @@ if (is_host === true) {
             });
           } else if (menuOption === 2) {
             // Invite More People - trigger INVITE_MORE_PEOPLE flow with event and crew pre-selected
+            // Log invite more initiated
+            logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'invite_more_initiated',
+              executionStatus: 'success',
+              eventId: eventId,
+              metadata: {
+                event_id: eventId,
+                event_title: eventTitle
+              }
+            });
+            
             // Get full event data with crews relation (same format as INVITE_MORE_PEOPLE expects)
             const { data: eventData, error: eventError } = await supabase
               .from('events')
@@ -6179,6 +7587,19 @@ if (is_host === true) {
             });
           } else if (menuOption === 3) {
             // Duplicate Event
+            // Log duplicate initiated
+            logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'duplicate_initiated',
+              executionStatus: 'success',
+              metadata: {
+                source_event_id: eventId,
+                source_event_title: eventTitle
+              }
+            });
+            
             responseContent = `What should we call the new event? Type a new name or 'same' to keep '${eventTitle}'.`;
             shouldSendSMS = true;
             
@@ -6208,6 +7629,19 @@ if (is_host === true) {
             });
           } else if (menuOption === 4) {
             // Delete Event
+            // Log delete initiated
+            logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'delete_initiated',
+              executionStatus: 'success',
+              metadata: {
+                event_id: eventId,
+                event_title: eventTitle
+              }
+            });
+            
             responseContent = `Delete '${eventTitle}'? Type 'delete' to confirm or 'exit' to stop.`;
             shouldSendSMS = true;
             
@@ -6237,6 +7671,19 @@ if (is_host === true) {
             });
           } else if (menuOption === 5) {
             // Exit
+            // Log menu exit
+            logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'menu_exit',
+              executionStatus: 'success',
+              metadata: {
+                event_id: eventId,
+                event_title: eventTitle
+              }
+            });
+            
             responseContent = 'What would you like to do next?';
             shouldSendSMS = true;
             
@@ -6262,6 +7709,19 @@ if (is_host === true) {
           }
         } catch (error) {
           console.error('Error in EVENT_MANAGEMENT_MENU_SELECTION:', error);
+          
+          logWorkflowError({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'error',
+            errorDetails: {
+              error_message: error instanceof Error ? error.message : String(error),
+              step: 'EVENT_MANAGEMENT_MENU_SELECTION',
+              action: 'EVENT_MANAGEMENT_MENU_SELECTION'
+            }
+          });
+          
           responseContent = 'Failed to process menu selection. Please try again.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6281,6 +7741,20 @@ if (is_host === true) {
           const field = extractedData?.field;
           const eventId = conversationState?.extracted_data?.[0]?.event_id;
           const eventTitle = conversationState?.extracted_data?.[0]?.event_title;
+          
+          // Log edit field selected
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'edit_field_selected',
+            executionStatus: 'success',
+            metadata: {
+              field: field,
+              event_id: eventId,
+              event_title: eventTitle
+            }
+          });
           
           // Get current value
           const { data: eventData } = await supabase
@@ -6326,6 +7800,19 @@ if (is_host === true) {
           });
         } catch (error) {
           console.error('Error in EVENT_EDIT_FIELD_SELECTED:', error);
+          
+          logWorkflowError({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'error',
+            errorDetails: {
+              error_message: error instanceof Error ? error.message : String(error),
+              step: 'EVENT_EDIT_FIELD_SELECTED',
+              action: 'EVENT_EDIT_FIELD_SELECTED'
+            }
+          });
+          
           responseContent = 'Failed to select field. Please try again.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6364,6 +7851,21 @@ if (is_host === true) {
               // Try parsing as-is
               inputDate = new Date(parsedDateStr);
               if (isNaN(inputDate.getTime())) {
+                // Log invalid field input
+                logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'manage_event',
+                  workflowStep: 'edit_field_invalid',
+                  executionStatus: 'failure',
+                  metadata: {
+                    field: field,
+                    input_value: value,
+                    event_id: eventId,
+                    error: 'invalid_date_format'
+                  }
+                });
+                
                 responseContent = "I didn't understand that. Enter a new date or type 'exit'.";
                 shouldSendSMS = true;
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6385,6 +7887,21 @@ if (is_host === true) {
             inputDate.setHours(0, 0, 0, 0);
             
             if (inputDate <= today) {
+              // Log invalid field input
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'manage_event',
+                workflowStep: 'edit_field_invalid',
+                executionStatus: 'failure',
+                metadata: {
+                  field: field,
+                  input_value: value,
+                  event_id: eventId,
+                  error: 'date_not_in_future'
+                }
+              });
+              
               responseContent = "Date/time must be in the future. Enter a new value or type 'exit'.";
               shouldSendSMS = true;
               await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6416,6 +7933,21 @@ if (is_host === true) {
               if (hours >= 0 && hours < 24 && minutes >= 0 && minutes < 60) {
                 validatedValue = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:00`;
               } else {
+                // Log invalid field input
+                logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'manage_event',
+                  workflowStep: 'edit_field_invalid',
+                  executionStatus: 'failure',
+                  metadata: {
+                    field: field,
+                    input_value: value,
+                    event_id: eventId,
+                    error: 'invalid_time_range'
+                  }
+                });
+                
                 responseContent = "I didn't understand that. Enter a new time or type 'exit'.";
                 shouldSendSMS = true;
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6432,6 +7964,21 @@ if (is_host === true) {
               // Already in HH:MM or HH:MM:SS format
               validatedValue = timeValue.length === 5 ? `${timeValue}:00` : timeValue;
             } else {
+              // Log invalid field input
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'manage_event',
+                workflowStep: 'edit_field_invalid',
+                executionStatus: 'failure',
+                metadata: {
+                  field: field,
+                  input_value: value,
+                  event_id: eventId,
+                  error: 'invalid_time_format'
+                }
+              });
+              
               responseContent = "I didn't understand that. Enter a new time or type 'exit'.";
               shouldSendSMS = true;
               await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6459,6 +8006,21 @@ if (is_host === true) {
                 const eventDateTime = new Date(`${dateToUse}T${validatedValue}`);
                 const now = new Date();
                 if (isNaN(eventDateTime.getTime()) || eventDateTime <= now) {
+                  // Log invalid field input
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'manage_event',
+                    workflowStep: 'edit_field_invalid',
+                    executionStatus: 'failure',
+                    metadata: {
+                      field: field,
+                      input_value: value,
+                      event_id: eventId,
+                      error: 'datetime_not_in_future'
+                    }
+                  });
+                  
                   responseContent = "Date/time must be in the future. Enter a new value or type 'exit'.";
                   shouldSendSMS = true;
                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6477,6 +8039,21 @@ if (is_host === true) {
             }
           } else if (field === 'notes') {
             if (value.length > 160) {
+              // Log invalid field input
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'manage_event',
+                workflowStep: 'edit_field_invalid',
+                executionStatus: 'failure',
+                metadata: {
+                  field: field,
+                  input_value_length: value.length,
+                  event_id: eventId,
+                  error: 'notes_too_long'
+                }
+              });
+              
               responseContent = "Notes are too long. Keep it under 160 characters.";
               shouldSendSMS = true;
               await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6491,6 +8068,21 @@ if (is_host === true) {
             }
           } else if (field === 'name') {
             if (!value || value.trim().length < 2) {
+              // Log invalid field input
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'manage_event',
+                workflowStep: 'edit_field_invalid',
+                executionStatus: 'failure',
+                metadata: {
+                  field: field,
+                  input_value: value,
+                  event_id: eventId,
+                  error: 'name_too_short'
+                }
+              });
+              
               responseContent = "I didn't understand that. Enter a new name or type 'exit'.";
               shouldSendSMS = true;
               await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6505,6 +8097,21 @@ if (is_host === true) {
             }
           } else if (field === 'location') {
             if (!value || value.trim().length < 2) {
+              // Log invalid field input
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'manage_event',
+                workflowStep: 'edit_field_invalid',
+                executionStatus: 'failure',
+                metadata: {
+                  field: field,
+                  input_value: value,
+                  event_id: eventId,
+                  error: 'location_too_short'
+                }
+              });
+              
               responseContent = "I didn't understand that. Enter a new location or type 'exit'.";
               shouldSendSMS = true;
               await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6529,6 +8136,35 @@ if (is_host === true) {
           if (!updatedEditedFields.includes(field)) {
             updatedEditedFields.push(field);
           }
+          
+          // Log edit field input (successful)
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'edit_field_input',
+            executionStatus: 'success',
+            metadata: {
+              field: field,
+              input_value: value,
+              validated_value: validatedValue,
+              event_id: eventId
+            }
+          });
+          
+          // Log edit changes staged
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'edit_changes_staged',
+            executionStatus: 'success',
+            metadata: {
+              edited_fields: updatedEditedFields,
+              pending_changes: updatedPendingChanges,
+              event_id: eventId
+            }
+          });
           
           // Ask if they want to edit another field (per spec)
           responseContent = `What would you like to change? (name/date/time/location/notes)`;
@@ -6560,6 +8196,19 @@ if (is_host === true) {
           });
         } catch (error) {
           console.error('Error in EVENT_EDIT_FIELD_INPUT:', error);
+          
+          logWorkflowError({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'error',
+            errorDetails: {
+              error_message: error instanceof Error ? error.message : String(error),
+              step: 'EVENT_EDIT_FIELD_INPUT',
+              action: 'EVENT_EDIT_FIELD_INPUT'
+            }
+          });
+          
           responseContent = 'Failed to save changes. Please try again.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6575,6 +8224,21 @@ if (is_host === true) {
       } else if (action === 'INVALID_EVENT_EDIT_FIELD_SELECTION') {
         console.log('INVALID_EVENT_EDIT_FIELD_SELECTION detected via pattern matching');
         
+        const eventId = conversationState?.extracted_data?.[0]?.event_id;
+        
+        // Log invalid field selection
+        logWorkflowProgress({
+          supabase,
+          userId,
+          workflowName: 'manage_event',
+          workflowStep: 'edit_field_invalid',
+          executionStatus: 'failure',
+          metadata: {
+            event_id: eventId,
+            error: 'invalid_field_selection'
+          }
+        });
+        
         responseContent = `I didn't understand that. Type one of: name, date, time, location, notes — or 'exit'.`;
         shouldSendSMS = true;
         
@@ -6589,6 +8253,21 @@ if (is_host === true) {
         });
       } else if (action === 'INVALID_EVENT_EDIT_CONTINUE') {
         console.log('INVALID_EVENT_EDIT_CONTINUE detected via pattern matching');
+        
+        const eventId = conversationState?.extracted_data?.[0]?.event_id;
+        
+        // Log invalid continue input
+        logWorkflowProgress({
+          supabase,
+          userId,
+          workflowName: 'manage_event',
+          workflowStep: 'edit_field_invalid',
+          executionStatus: 'failure',
+          metadata: {
+            event_id: eventId,
+            error: 'invalid_continue_input'
+          }
+        });
         
         responseContent = `I didn't understand that. Edit another field? (name/date/time/location/notes) or type 'Done'`;
         shouldSendSMS = true;
@@ -6610,6 +8289,21 @@ if (is_host === true) {
           const eventTitle = conversationState?.extracted_data?.[0]?.event_title;
           const editedFields = conversationState?.extracted_data?.[0]?.edited_fields || [];
           const pendingChanges = conversationState?.extracted_data?.[0]?.pending_changes || {};
+          
+          // Log edit done
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'edit_done',
+            executionStatus: 'success',
+            metadata: {
+              event_id: eventId,
+              event_title: eventTitle,
+              edited_fields: editedFields,
+              pending_changes: pendingChanges
+            }
+          });
           
           if (editedFields.length === 0) {
             // No changes made
@@ -6664,6 +8358,19 @@ if (is_host === true) {
           });
         } catch (error) {
           console.error('Error in EVENT_EDIT_DONE:', error);
+          
+          logWorkflowError({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'error',
+            errorDetails: {
+              error_message: error instanceof Error ? error.message : String(error),
+              step: 'EVENT_EDIT_DONE',
+              action: 'EVENT_EDIT_DONE'
+            }
+          });
+          
           responseContent = 'Failed to prepare changes. Please try again.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6710,6 +8417,20 @@ if (is_host === true) {
           
           if (updateError) {
             console.error('Error updating event:', updateError);
+            
+            logWorkflowError({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'error',
+              errorDetails: {
+                error_message: updateError.message,
+                error_code: updateError.code,
+                step: 'EVENT_EDIT_CONFIRM_CHANGES',
+                action: 'EVENT_EDIT_CONFIRM_CHANGES'
+              }
+            });
+            
             responseContent = 'Failed to save changes. Please try again.';
             shouldSendSMS = true;
             await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6723,11 +8444,39 @@ if (is_host === true) {
             });
           }
           
+          // Log edit changes confirmed
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'edit_changes_confirmed',
+            executionStatus: 'success',
+            metadata: {
+              event_id: eventId,
+              event_title: eventTitle,
+              edited_fields: editedFields,
+              changes_applied: updateData
+            }
+          });
+          
           // Check if any edited fields require resending invitations
           const resendFields = ['name', 'date', 'time', 'location'];
           const needsResend = editedFields.some((field: string) => resendFields.includes(field));
           
           if (needsResend) {
+            // Log edit resend prompted
+            logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'edit_resend_prompted',
+              executionStatus: 'success',
+              metadata: {
+                event_id: eventId,
+                edited_fields: editedFields
+              }
+            });
+            
             // Ask if they want to resend invitations
             responseContent = `All changes saved!\n\n`;
             responseContent += `Would you like to send updated invitations to all guests? Reply 'yes' or 'no'.`;
@@ -6775,6 +8524,19 @@ if (is_host === true) {
           }
         } catch (error) {
           console.error('Error in EVENT_EDIT_CONFIRM_CHANGES:', error);
+          
+          logWorkflowError({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'error',
+            errorDetails: {
+              error_message: error instanceof Error ? error.message : String(error),
+              step: 'EVENT_EDIT_CONFIRM_CHANGES',
+              action: 'EVENT_EDIT_CONFIRM_CHANGES'
+            }
+          });
+          
           responseContent = 'Failed to save changes. Please try again.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6793,6 +8555,18 @@ if (is_host === true) {
         try {
           const eventId = conversationState?.extracted_data?.[0]?.event_id;
           
+          // Log edit changes cancelled
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'edit_changes_cancelled',
+            executionStatus: 'success',
+            metadata: {
+              event_id: eventId
+            }
+          });
+          
           // Discard changes and return to menu
           responseContent = `Changes cancelled.\n\n`;
           const menuDisplay = await showEventDetailsAndMenu(supabase, userId, phone_number, send_sms, eventId, phone_number);
@@ -6810,6 +8584,19 @@ if (is_host === true) {
           });
         } catch (error) {
           console.error('Error in EVENT_EDIT_CANCEL_CHANGES:', error);
+          
+          logWorkflowError({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'error',
+            errorDetails: {
+              error_message: error instanceof Error ? error.message : String(error),
+              step: 'EVENT_EDIT_CANCEL_CHANGES',
+              action: 'EVENT_EDIT_CANCEL_CHANGES'
+            }
+          });
+          
           responseContent = 'Failed to cancel. Please try again.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6827,6 +8614,18 @@ if (is_host === true) {
         
         try {
           const eventId = conversationState?.extracted_data?.[0]?.event_id;
+          
+          // Log edit resend confirmed
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'edit_resend_confirmed',
+            executionStatus: 'success',
+            metadata: {
+              event_id: eventId
+            }
+          });
           
           // Get all invitations for this event
           const { data: invitations } = await supabase
@@ -6857,6 +8656,19 @@ if (is_host === true) {
           });
         } catch (error) {
           console.error('Error in EVENT_EDIT_RESEND_YES:', error);
+          
+          logWorkflowError({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'error',
+            errorDetails: {
+              error_message: error instanceof Error ? error.message : String(error),
+              step: 'EVENT_EDIT_RESEND_YES',
+              action: 'EVENT_EDIT_RESEND_YES'
+            }
+          });
+          
           responseContent = 'Failed to send invitations. Please try again.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6875,6 +8687,18 @@ if (is_host === true) {
         try {
           const eventId = conversationState?.extracted_data?.[0]?.event_id;
           
+          // Log edit resend declined
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'edit_resend_declined',
+            executionStatus: 'success',
+            metadata: {
+              event_id: eventId
+            }
+          });
+          
           // Show menu again
           responseContent = await showEventDetailsAndMenu(supabase, userId, phone_number, send_sms, eventId, phone_number);
           shouldSendSMS = true;
@@ -6890,6 +8714,19 @@ if (is_host === true) {
           });
         } catch (error) {
           console.error('Error in EVENT_EDIT_RESEND_NO:', error);
+          
+          logWorkflowError({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'error',
+            errorDetails: {
+              error_message: error instanceof Error ? error.message : String(error),
+              step: 'EVENT_EDIT_RESEND_NO',
+              action: 'EVENT_EDIT_RESEND_NO'
+            }
+          });
+          
           responseContent = 'Failed to return to menu. Please try again.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -6910,11 +8747,28 @@ if (is_host === true) {
           const sourceEventTitle = conversationState?.extracted_data?.[0]?.source_event_title;
           
           let newEventName;
+          let sameName = false;
           if (action === 'DUPLICATE_EVENT_SAME_NAME') {
             newEventName = sourceEventTitle;
+            sameName = true;
           } else {
             newEventName = extractedData?.name;
           }
+          
+          // Log duplicate name input
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'duplicate_name_input',
+            executionStatus: 'success',
+            metadata: {
+              source_event_id: sourceEventId,
+              source_event_title: sourceEventTitle,
+              new_name: newEventName,
+              same_name: sameName
+            }
+          });
           
           responseContent = `Enter the new date (e.g., Fri Nov 21).`;
           shouldSendSMS = true;
@@ -6993,6 +8847,20 @@ if (is_host === true) {
           const dateValue = extractedData?.date;
           const newEventName = conversationState?.extracted_data?.[0]?.new_event_name;
           const sourceEventId = conversationState?.extracted_data?.[0]?.source_event_id;
+          
+          // Log duplicate date input (before validation)
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'duplicate_date_input',
+            executionStatus: 'success',
+            metadata: {
+              source_event_id: sourceEventId,
+              new_event_name: newEventName,
+              date_input: dateValue
+            }
+          });
           
           // Check for explicit year in the input (e.g., "Jan 1 2024", "Nov 1 2024")
           const yearMatch = dateValue.match(/\b(19|20)\d{2}\b/);
@@ -7180,6 +9048,21 @@ if (is_host === true) {
           const newEventDate = conversationState?.extracted_data?.[0]?.new_event_date;
           const sourceEventId = conversationState?.extracted_data?.[0]?.source_event_id;
           
+          // Log duplicate time input (before validation)
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'duplicate_time_input',
+            executionStatus: 'success',
+            metadata: {
+              source_event_id: sourceEventId,
+              new_event_name: newEventName,
+              new_event_date: newEventDate,
+              time_input: timeValue
+            }
+          });
+          
           // Parse time - handle formats like "7pm", "7:00 PM", "19:00" (same as Update Event)
           let validatedTime = timeValue.trim();
           const timeMatch = validatedTime.match(/(\d{1,2}):?(\d{0,2})\s*(am|pm)?/i);
@@ -7313,6 +9196,21 @@ if (is_host === true) {
           responseContent = `New event: ${newEventName} on ${formattedDate}, ${formattedTime} at ${sourceEvent.location || 'TBD'}.\n\n`;
           responseContent += `Send invitations now? Reply 'yes' or 'no'.`;
           
+          // Log duplicate send invitations prompted
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'duplicate_send_invitations_prompted',
+            executionStatus: 'success',
+            metadata: {
+              source_event_id: sourceEventId,
+              new_event_name: newEventName,
+              new_event_date: newEventDate,
+              new_event_time: validatedTime
+            }
+          });
+          
           // Update state with event details (don't create event yet)
           await supabase
             .from('conversation_state')
@@ -7387,6 +9285,20 @@ if (is_host === true) {
           
           if (createError || !newEvent) {
             console.error('Error creating duplicate event:', createError);
+            
+            logWorkflowError({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'error',
+              errorDetails: {
+                error_message: createError?.message || 'Failed to create duplicate event',
+                error_code: createError?.code,
+                step: 'DUPLICATE_SEND_INVITATIONS_YES',
+                action: 'DUPLICATE_SEND_INVITATIONS_YES'
+              }
+            });
+            
             responseContent = 'Failed to create event. Please try again.';
             shouldSendSMS = true;
             await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -7399,6 +9311,37 @@ if (is_host === true) {
               headers: { ...corsHeaders, 'Content-Type': 'application/json' }
             });
           }
+          
+          // Log duplicate created
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'duplicate_created',
+            executionStatus: 'success',
+            eventId: newEvent.id,
+            metadata: {
+              source_event_id: eventData?.source_event_id,
+              new_event_id: newEvent.id,
+              new_event_title: newEvent.title,
+              new_event_date: newEvent.event_date,
+              new_event_time: newEvent.start_time
+            }
+          });
+          
+          // Log duplicate send invitations confirmed
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'duplicate_send_invitations_confirmed',
+            executionStatus: 'success',
+            eventId: newEvent.id,
+            metadata: {
+              new_event_id: newEvent.id,
+              new_event_title: newEvent.title
+            }
+          });
           
           // Check if event has a crew_id before calling send-invitations
           if (!newEvent.crew_id) {
@@ -7422,7 +9365,7 @@ if (is_host === true) {
               timeStr = timeDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
             }
             
-            responseContent = `Event created: ${eventData?.title || newEvent.title} on ${dateStr} at ${timeStr}. No crew found to send invitations to. Check RSVPs: ${eventLink}`;
+            responseContent = `Event created: ${eventData?.title || newEvent.title} on ${dateStr} at ${timeStr}. No crew found to send invitations to. Type "RSVPs" to check responses.`;
           } else {
             // Call send-invitations edge function to send SMS invitations
             const inviteResponse = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/send-invitations`, {
@@ -7472,7 +9415,7 @@ if (is_host === true) {
               
               // Use successful count if available, otherwise use total count
               const invitesSent = successfulInvites > 0 ? successfulInvites : (totalInvites > 0 ? totalInvites : 0);
-              responseContent = `${invitesSent} invites sent for ${eventData?.title || newEvent.title} on ${dateStr} at ${timeStr}. Check RSVPs: ${eventLink}`;
+              responseContent = `${invitesSent} invites sent for ${eventData?.title || newEvent.title} on ${dateStr} at ${timeStr}. Type "RSVPs" to check responses.`;
             } else {
               console.error('send-invitations returned unsuccessful result:', inviteResult);
               const errorMessage = inviteResult.error || inviteResult.message || 'Unknown error';
@@ -7502,6 +9445,19 @@ if (is_host === true) {
           });
         } catch (error) {
           console.error('Error in DUPLICATE_SEND_INVITATIONS_YES:', error);
+          
+          logWorkflowError({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'error',
+            errorDetails: {
+              error_message: error instanceof Error ? error.message : String(error),
+              step: 'DUPLICATE_SEND_INVITATIONS_YES',
+              action: 'DUPLICATE_SEND_INVITATIONS_YES'
+            }
+          });
+          
           responseContent = 'Failed to send invitations. Please try again.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -7545,6 +9501,20 @@ if (is_host === true) {
           
           if (createError || !newEvent) {
             console.error('Error creating duplicate event:', createError);
+            
+            logWorkflowError({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'error',
+              errorDetails: {
+                error_message: createError?.message || 'Failed to create duplicate event',
+                error_code: createError?.code,
+                step: 'DUPLICATE_SEND_INVITATIONS_NO',
+                action: 'DUPLICATE_SEND_INVITATIONS_NO'
+              }
+            });
+            
             responseContent = 'Failed to create event. Please try again.';
             shouldSendSMS = true;
             await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -7557,6 +9527,37 @@ if (is_host === true) {
               headers: { ...corsHeaders, 'Content-Type': 'application/json' }
             });
           }
+          
+          // Log duplicate created
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'duplicate_created',
+            executionStatus: 'success',
+            eventId: newEvent.id,
+            metadata: {
+              source_event_id: eventData?.source_event_id,
+              new_event_id: newEvent.id,
+              new_event_title: newEvent.title,
+              new_event_date: newEvent.event_date,
+              new_event_time: newEvent.start_time
+            }
+          });
+          
+          // Log duplicate send invitations declined
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'duplicate_send_invitations_declined',
+            executionStatus: 'success',
+            eventId: newEvent.id,
+            metadata: {
+              new_event_id: newEvent.id,
+              new_event_title: newEvent.title
+            }
+          });
           
           // Get event link for confirmation
           const { shorten_event_url, event: eventDataWithUrl } = await fetchEventWithShortUrl(supabase, newEvent.id, userId);
@@ -7650,6 +9651,19 @@ if (is_host === true) {
           const eventId = conversationState?.extracted_data?.[0]?.event_id;
           const eventTitle = conversationState?.extracted_data?.[0]?.event_title;
           
+          // Log delete confirmed
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'delete_confirmed',
+            executionStatus: 'success',
+            metadata: {
+              event_id: eventId,
+              event_title: eventTitle
+            }
+          });
+          
           // Check if there are any invitations
           const { data: invitations } = await supabase
             .from('invitations')
@@ -7657,6 +9671,20 @@ if (is_host === true) {
             .eq('event_id', eventId);
           
           if (invitations && invitations.length > 0) {
+            // Log delete send cancellation prompted
+            logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'delete_send_cancellation_prompted',
+              executionStatus: 'success',
+              metadata: {
+                event_id: eventId,
+                event_title: eventTitle,
+                invitation_count: invitations.length
+              }
+            });
+            
             // Ask if they want to send cancellation message
             responseContent = `Would you like to send a cancellation message to invitees? Reply 'yes' or 'no'.`;
             shouldSendSMS = true;
@@ -7693,8 +9721,36 @@ if (is_host === true) {
             
             if (deleteError) {
               console.error('Error deleting event:', deleteError);
+              
+              logWorkflowError({
+                supabase,
+                userId,
+                workflowName: 'manage_event',
+                workflowStep: 'error',
+                errorDetails: {
+                  error_message: deleteError.message,
+                  error_code: deleteError.code,
+                  step: 'DELETE_EVENT_CONFIRMED',
+                  action: 'DELETE_EVENT_CONFIRMED'
+                }
+              });
+              
               responseContent = 'Failed to delete event. Please try again.';
             } else {
+              // Log delete completed
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'manage_event',
+                workflowStep: 'delete_completed',
+                executionStatus: 'success',
+                metadata: {
+                  event_id: eventId,
+                  event_title: eventTitle,
+                  has_invitations: false
+                }
+              });
+              
               responseContent = `Event "${eventTitle}" has been deleted.`;
             }
             
@@ -7721,6 +9777,19 @@ if (is_host === true) {
           }
         } catch (error) {
           console.error('Error in DELETE_EVENT_CONFIRMED:', error);
+          
+          logWorkflowError({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'error',
+            errorDetails: {
+              error_message: error instanceof Error ? error.message : String(error),
+              step: 'DELETE_EVENT_CONFIRMED',
+              action: 'DELETE_EVENT_CONFIRMED'
+            }
+          });
+          
           responseContent = 'Failed to delete event. Please try again.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -7739,6 +9808,19 @@ if (is_host === true) {
         try {
           const eventId = conversationState?.extracted_data?.[0]?.event_id;
           const eventTitle = conversationState?.extracted_data?.[0]?.event_title;
+          
+          // Log delete send cancellation confirmed
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'delete_send_cancellation_confirmed',
+            executionStatus: 'success',
+            metadata: {
+              event_id: eventId,
+              event_title: eventTitle
+            }
+          });
           
           responseContent = `Type a short message to include (or type 'skip' to send without a note).`;
           shouldSendSMS = true;
@@ -7786,6 +9868,19 @@ if (is_host === true) {
           const eventId = conversationState?.extracted_data?.[0]?.event_id;
           const eventTitle = conversationState?.extracted_data?.[0]?.event_title;
           
+          // Log delete send cancellation declined
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'delete_send_cancellation_declined',
+            executionStatus: 'success',
+            metadata: {
+              event_id: eventId,
+              event_title: eventTitle
+            }
+          });
+          
           // Delete all invitations
           await supabase
             .from('invitations')
@@ -7800,8 +9895,36 @@ if (is_host === true) {
           
           if (deleteError) {
             console.error('Error deleting event:', deleteError);
+            
+            logWorkflowError({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'error',
+              errorDetails: {
+                error_message: deleteError.message,
+                error_code: deleteError.code,
+                step: 'DELETE_EVENT_SEND_CANCELLATION_NO',
+                action: 'DELETE_EVENT_SEND_CANCELLATION_NO'
+              }
+            });
+            
             responseContent = 'Failed to delete event. Please try again.';
           } else {
+            // Log delete completed
+            logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'delete_completed',
+              executionStatus: 'success',
+              metadata: {
+                event_id: eventId,
+                event_title: eventTitle,
+                cancellation_sent: false
+              }
+            });
+            
             responseContent = `Event deleted. No cancellation messages were sent. Action ends.`;
           }
           
@@ -7845,6 +9968,21 @@ if (is_host === true) {
         try {
           const eventId = conversationState?.extracted_data?.[0]?.event_id;
           const eventTitle = conversationState?.extracted_data?.[0]?.event_title;
+          
+          // Log delete cancellation message input (skip)
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'delete_cancellation_message_input',
+            executionStatus: 'success',
+            metadata: {
+              event_id: eventId,
+              event_title: eventTitle,
+              message_skipped: true,
+              message_length: 0
+            }
+          });
           
           // Get all invitations
           const { data: invitations } = await supabase
@@ -7907,7 +10045,36 @@ if (is_host === true) {
           
           if (deleteError) {
             console.error('Error deleting event:', deleteError);
+            
+            logWorkflowError({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'error',
+              errorDetails: {
+                error_message: deleteError.message,
+                error_code: deleteError.code,
+                step: 'DELETE_EVENT_CANCELLATION_SKIP',
+                action: 'DELETE_EVENT_CANCELLATION_SKIP'
+              }
+            });
+            
             responseContent = 'Failed to delete event. Please try again.';
+          } else {
+            // Log delete completed
+            logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'delete_completed',
+              executionStatus: 'success',
+              metadata: {
+                event_id: eventId,
+                event_title: eventTitle,
+                cancellation_sent: sentCount > 0,
+                cancellation_count: sentCount
+              }
+            });
           }
           
           // Clear state
@@ -7951,6 +10118,21 @@ if (is_host === true) {
           const eventId = conversationState?.extracted_data?.[0]?.event_id;
           const eventTitle = conversationState?.extracted_data?.[0]?.event_title;
           const cancellationMessage = extractedData?.message;
+          
+          // Log delete cancellation message input
+          logWorkflowProgress({
+            supabase,
+            userId,
+            workflowName: 'manage_event',
+            workflowStep: 'delete_cancellation_message_input',
+            executionStatus: 'success',
+            metadata: {
+              event_id: eventId,
+              event_title: eventTitle,
+              message_length: cancellationMessage?.length || 0,
+              message_skipped: cancellationMessage?.trim() === 'skip'
+            }
+          });
           
           // Get all invitations
           const { data: invitations } = await supabase
@@ -8021,7 +10203,36 @@ if (is_host === true) {
           
           if (deleteError) {
             console.error('Error deleting event:', deleteError);
+            
+            logWorkflowError({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'error',
+              errorDetails: {
+                error_message: deleteError.message,
+                error_code: deleteError.code,
+                step: 'DELETE_EVENT_CANCELLATION_MESSAGE',
+                action: 'DELETE_EVENT_CANCELLATION_MESSAGE'
+              }
+            });
+            
             responseContent = 'Failed to delete event. Please try again.';
+          } else {
+            // Log delete completed
+            logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'manage_event',
+              workflowStep: 'delete_completed',
+              executionStatus: 'success',
+              metadata: {
+                event_id: eventId,
+                event_title: eventTitle,
+                cancellation_sent: sentCount > 0,
+                cancellation_count: sentCount
+              }
+            });
           }
           
           // Clear state
@@ -8235,6 +10446,15 @@ if (is_host === true) {
              } else if (action === 'CREW_SELECTION_SEND_INVITATIONS') {
                console.log('CREW_SELECTION_SEND_INVITATIONS detected via pattern matching, bypassing AI');
                
+               // Log workflow start
+               logWorkflowStart({
+                 supabase,
+                 userId,
+                 workflowName: 'send_invitations',
+                 workflowStep: 'crew_selection',
+                 inputData: { crew_index: extractedData.crew_index }
+               });
+               
                try {
                  const crewIndex = extractedData.crew_index;
                  
@@ -8253,10 +10473,28 @@ if (is_host === true) {
                  }
                  
                  if (!crewList || crewIndex < 0 || crewIndex >= crewList.length) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'invalid_crew_selection',
+                     executionStatus: 'failure',
+                     metadata: { crew_index: crewIndex, crews_available: crewList?.length || 0 }
+                   });
                    responseContent = `I didn't understand that. Reply with a crew number, "Create Crew", or "exit" to do something else.`;
                    shouldSendSMS = true;
                  } else {
                    const selectedCrew = crewList[crewIndex];
+                   
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'crew_selected',
+                     executionStatus: 'success',
+                     crewId: selectedCrew.id,
+                     metadata: { crew_name: selectedCrew.name, crew_index: crewIndex }
+                   });
                    
                    // Start progressive event details collection - ask for event name first
                    responseContent = "What's the Event name?";
@@ -8291,6 +10529,16 @@ if (is_host === true) {
                          ]
                        })
                        .eq('user_id', userId);
+                   
+                   logWorkflowComplete({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'crew_selection_completed',
+                     executionStatus: 'success',
+                     crewId: selectedCrew.id,
+                     outputData: { crew_name: selectedCrew.name }
+                   });
                  }
                  
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -8305,6 +10553,13 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in CREW_SELECTION_SEND_INVITATIONS pattern matching:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'send_invitations',
+                   workflowStep: 'crew_selection_error',
+                   errorDetails: { error: error.message || String(error) }
+                 });
                  responseContent = 'Failed to select crew for event creation. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -8318,20 +10573,46 @@ if (is_host === true) {
                    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
                  });
                }
-             } else if (action === 'CHECK_CREW_MEMBERS') {
-               console.log('CHECK_CREW_MEMBERS detected via pattern matching, bypassing AI');
-               
-               try {
-                 const crewName = extractedData?.crewName;
-                 
-                 // Get user's crews (only their own crews - creator_id = userId)
-                 const { data: userCrews, error: crewsError } = await supabase
-                   .from('crews')
-                   .select('id, name')
-                   .eq('creator_id', userId)
-                   .order('name');
-                 
-                 if (crewsError) {
+            } else if (action === 'CHECK_CREW_MEMBERS') {
+              console.log('CHECK_CREW_MEMBERS detected via pattern matching, bypassing AI');
+              
+              // Log flow started
+              logWorkflowStart({
+                supabase,
+                userId,
+                workflowName: 'check_crew_members',
+                workflowStep: 'initiated',
+                inputData: {
+                  crew_name: extractedData?.crewName || null,
+                  action: 'CHECK_CREW_MEMBERS',
+                  extracted_data: extractedData
+                }
+              });
+              
+              try {
+                const crewName = extractedData?.crewName;
+                
+                // Get user's crews (only their own crews - creator_id = userId)
+                const { data: userCrews, error: crewsError } = await supabase
+                  .from('crews')
+                  .select('id, name')
+                  .eq('creator_id', userId)
+                  .order('name');
+                
+                // Log fetch user crews
+                logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'check_crew_members',
+                  workflowStep: 'fetch_user_crews',
+                  executionStatus: crewsError ? 'failure' : 'success',
+                  metadata: {
+                    crew_count: userCrews?.length || 0,
+                    error: crewsError ? crewsError.message : null
+                  }
+                });
+                
+                if (crewsError) {
                    console.error('Error fetching crews:', crewsError);
                    responseContent = 'Sorry, I couldn\'t fetch your crews. Please try again.';
                    shouldSendSMS = true;
@@ -8346,10 +10627,23 @@ if (is_host === true) {
                    });
                  }
                  
-                 // Section 1: Crew Selection
-                 if (!userCrews || userCrews.length === 0) {
-                   // 0 crews - jump to CREATE_CREW
-                   responseContent = 'No crews found. Type \'Create Crew\' to create your first crew.';
+                // Section 1: Crew Selection
+                if ((!userCrews || userCrews.length === 0) && !crewName) {
+                  // 0 crews - jump to CREATE_CREW
+                  
+                  // Log no crews found
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'check_crew_members',
+                    workflowStep: 'no_crews_found',
+                    executionStatus: 'success',
+                    metadata: {
+                      suggested_action: 'CREATE_CREW'
+                    }
+                  });
+                  
+                  responseContent = 'No crews found. Type \'Create Crew\' to create your first crew.';
                    shouldSendSMS = true;
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
                    return new Response(JSON.stringify({
@@ -8360,11 +10654,42 @@ if (is_host === true) {
                    }), {
                      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
                    });
-                 } else if (userCrews.length === 1) {
-                   // 1 crew - skip selection, go to Section 2
-                   const crew = userCrews[0];
-                   responseContent = await showCrewMembersAndMenu(supabase, userId, phone_number, send_sms, crew.id, crew.name, phone_number);
-                   return new Response(JSON.stringify({
+                } else if (userCrews.length === 1) {
+                  // 1 crew - skip selection, go to Section 2
+                  const crew = userCrews[0];
+                  
+                  // Log auto-select single crew
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'check_crew_members',
+                    workflowStep: 'auto_select_single_crew',
+                    executionStatus: 'success',
+                    crewId: crew.id,
+                    metadata: {
+                      crew_id: crew.id,
+                      crew_name: crew.name
+                    }
+                  });
+                  
+                  responseContent = await showCrewMembersAndMenu(supabase, userId, phone_number, send_sms, crew.id, crew.name, phone_number);
+                  
+                  // Log flow completed
+                  logWorkflowComplete({
+                    supabase,
+                    userId,
+                    workflowName: 'check_crew_members',
+                    workflowStep: 'completed',
+                    executionStatus: 'success',
+                    crewId: crew.id,
+                    outputData: {
+                      crew_id: crew.id,
+                      crew_name: crew.name,
+                      success: true
+                    }
+                  });
+                  
+                  return new Response(JSON.stringify({
                      success: true,
                      action: 'CHECK_CREW_MEMBERS',
                      response: responseContent,
@@ -8373,29 +10698,100 @@ if (is_host === true) {
                      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
                    });
                  } else {
-                   // 2+ crews
-                   if (crewName) {
-                     // User specified crew name - find all matches (exact first, then partial)
-                     const exactMatches = userCrews.filter(c => c.name.toLowerCase() === crewName.toLowerCase());
-                     const partialMatches = userCrews.filter(c => 
-                       c.name.toLowerCase().includes(crewName.toLowerCase()) && 
-                       !exactMatches.some(e => e.id === c.id)
-                     );
-                     
-                     // Combine: exact matches first, then partial matches
-                     const allMatches = [...exactMatches, ...partialMatches];
-                     
-                     if (allMatches.length === 0) {
-                       // No matches found
-                       responseContent = `Crew '${crewName}' not found or you don't have permission to manage it.`;
-                       shouldSendSMS = true;
-                     } else if (allMatches.length === 1) {
-                       // Single match - go directly to it
-                       const selectedCrew = allMatches[0];
-                       const ownership = await validateCrewOwnership(supabase, selectedCrew.id, userId);
-                       if (ownership.isValid) {
-                         responseContent = await showCrewMembersAndMenu(supabase, userId, phone_number, send_sms, selectedCrew.id, selectedCrew.name, phone_number);
-                         return new Response(JSON.stringify({
+                  // 2+ crews
+                  if (crewName) {
+                    // User specified crew name - find all matches (exact first, then partial)
+                    const exactMatches = userCrews.filter(c => c.name.toLowerCase() === crewName.toLowerCase());
+                    const partialMatches = userCrews.filter(c => 
+                      c.name.toLowerCase().includes(crewName.toLowerCase()) && 
+                      !exactMatches.some(e => e.id === c.id)
+                    );
+                    
+                    // Combine: exact matches first, then partial matches
+                    const allMatches = [...exactMatches, ...partialMatches];
+                    
+                    // Log crew name search
+                    logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'check_crew_members',
+                      workflowStep: 'crew_name_search',
+                      executionStatus: 'success',
+                      metadata: {
+                        crew_name_searched: crewName,
+                        exact_matches_count: exactMatches.length,
+                        partial_matches_count: partialMatches.length,
+                        total_matches_count: allMatches.length
+                      }
+                    });
+                    
+                    if (allMatches.length === 0) {
+                      // No matches found
+                      
+                      // Log crew not found by name
+                      logWorkflowProgress({
+                        supabase,
+                        userId,
+                        workflowName: 'check_crew_members',
+                        workflowStep: 'crew_not_found_by_name',
+                        executionStatus: 'failure',
+                        metadata: {
+                          crew_name_searched: crewName,
+                          error: 'crew_not_found'
+                        }
+                      });
+                      
+                      responseContent = `Crew '${crewName}' not found or you don't have permission to manage it.`;
+                      shouldSendSMS = true;
+                      await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                      return new Response(JSON.stringify({
+                        success: true,
+                        action: 'CHECK_CREW_MEMBERS',
+                        response: responseContent,
+                        optimization: 'pattern_matching'
+                      }), {
+                        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                      });
+                    } else if (allMatches.length === 1) {
+                      // Single match - go directly to it
+                      const selectedCrew = allMatches[0];
+                      
+                      // Log single match found
+                      const matchType = exactMatches.length > 0 ? 'exact' : 'partial';
+                      logWorkflowProgress({
+                        supabase,
+                        userId,
+                        workflowName: 'check_crew_members',
+                        workflowStep: 'single_match_found',
+                        executionStatus: 'success',
+                        crewId: selectedCrew.id,
+                        metadata: {
+                          crew_id: selectedCrew.id,
+                          crew_name: selectedCrew.name,
+                          match_type: matchType
+                        }
+                      });
+                      
+                      const ownership = await validateCrewOwnership(supabase, selectedCrew.id, userId);
+                      if (ownership.isValid) {
+                        responseContent = await showCrewMembersAndMenu(supabase, userId, phone_number, send_sms, selectedCrew.id, selectedCrew.name, phone_number);
+                        
+                        // Log flow completed
+                        logWorkflowComplete({
+                          supabase,
+                          userId,
+                          workflowName: 'check_crew_members',
+                          workflowStep: 'completed',
+                          executionStatus: 'success',
+                          crewId: selectedCrew.id,
+                          outputData: {
+                            crew_id: selectedCrew.id,
+                            crew_name: selectedCrew.name,
+                            success: true
+                          }
+                        });
+                        
+                        return new Response(JSON.stringify({
                            success: true,
                            action: 'CHECK_CREW_MEMBERS',
                            response: responseContent,
@@ -8407,14 +10803,28 @@ if (is_host === true) {
                          responseContent = `Crew '${crewName}' not found or you don't have permission to manage it.`;
                          shouldSendSMS = true;
                        }
-                     } else {
-                       // Multiple matches (duplicate or similar names) - show top 5 with pagination
-                       const topMatches = allMatches.slice(0, 5);
-                       const totalMatches = allMatches.length;
-                       const page = 0;
-                       const pageSize = 5;
-                       
-                       let crewList = `Found ${totalMatches} crew${totalMatches === 1 ? '' : 's'} matching '${crewName}'.\n\n`;
+                    } else {
+                      // Multiple matches (duplicate or similar names) - show top 5 with pagination
+                      const topMatches = allMatches.slice(0, 5);
+                      const totalMatches = allMatches.length;
+                      const page = 0;
+                      const pageSize = 5;
+                      
+                      // Log multiple matches found
+                      logWorkflowProgress({
+                        supabase,
+                        userId,
+                        workflowName: 'check_crew_members',
+                        workflowStep: 'multiple_matches_found',
+                        executionStatus: 'success',
+                        metadata: {
+                          total_matches: totalMatches,
+                          showing_count: 5,
+                          has_more: totalMatches > pageSize
+                        }
+                      });
+                      
+                      let crewList = `Found ${totalMatches} crew${totalMatches === 1 ? '' : 's'} matching '${crewName}'.\n\n`;
                        topMatches.forEach((crew, index) => {
                          crewList += `${index + 1}. ${crew.name}\n`;
                        });
@@ -8422,11 +10832,11 @@ if (is_host === true) {
                        const hasMore = totalMatches > pageSize;
                        crewList += '\n';
                        if (hasMore) {
-                         crewList += 'Reply with a number (1-5), \'Next\' or \'N\' for the next 5';
+                         crewList += 'Reply with a number (1-5), \'Next\' for the next 5';
                        } else {
                          crewList += 'Reply with a number (1-5)';
                        }
-                       crewList += ', \'Done\' or \'D\' to return to menu, \'Create Crew\' to make a new one, or \'exit\'.';
+                       crewList += ', \'Done\' to return to menu, \'Create Crew\' to make a new one, or \'exit\'.';
                        
                        responseContent = crewList;
                        shouldSendSMS = true;
@@ -8461,6 +10871,21 @@ if (is_host === true) {
                     const totalCrews = userCrews.length;
                     const crewsOnPage = userCrews.slice(page * pageSize, (page + 1) * pageSize);
                     
+                    // Log show crew list
+                    logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'check_crew_members',
+                      workflowStep: 'show_crew_list',
+                      executionStatus: 'success',
+                      metadata: {
+                        total_crews: totalCrews,
+                        showing_count: crewsOnPage.length,
+                        current_page: page,
+                        has_more: totalCrews > (page + 1) * pageSize
+                      }
+                    });
+                    
                     let crewList = `You have ${totalCrews} crew${totalCrews === 1 ? '' : 's'}. Which crew would you like to manage?\n\n`;
                     crewsOnPage.forEach((crew, index) => {
                       crewList += `${index + 1}. ${crew.name}\n`;
@@ -8478,14 +10903,14 @@ if (is_host === true) {
                     }
                     
                     if (hasMore && hasPrevious) {
-                      crewList += ', \'Next\' or \'N\' for the next 5, \'Prev\' or \'P\' for the previous 5';
+                      crewList += ', \'Next\' for the next 5, \'Prev\' for the previous 5';
                     } else if (hasMore) {
-                      crewList += ', \'Next\' or \'N\' for the next 5';
+                      crewList += ', \'Next\' for the next 5';
                     } else if (hasPrevious) {
-                      crewList += ', \'Prev\' or \'P\' for the previous 5';
+                      crewList += ', \'Prev\' for the previous 5';
                     }
                     
-                    crewList += ', \'Done\' or \'D\' to return to menu, \'Create Crew\' to make a new one, or \'exit\'.';
+                    crewList += ', \'Done\' to return to menu, \'Create Crew\' to make a new one, or \'exit\'.';
                     
                     responseContent = crewList;
                      shouldSendSMS = true;
@@ -8526,6 +10951,19 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in CHECK_CREW_MEMBERS pattern matching:', error);
+                 
+                 // Log flow error
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'check_crew_members',
+                   workflowStep: 'error',
+                   errorDetails: {
+                     error_message: error instanceof Error ? error.message : String(error),
+                     error_stack: error instanceof Error ? error.stack : undefined
+                   }
+                 });
+                 
                  responseContent = 'Failed to check crew members. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -8541,6 +10979,20 @@ if (is_host === true) {
                }
              } else if (action === 'CREW_SELECTION_MANAGE') {
                console.log('CREW_SELECTION_MANAGE detected via pattern matching');
+               
+               // Log workflow start
+               logWorkflowStart({
+                 supabase,
+                 userId,
+                 workflowName: 'manage_crew',
+                 workflowStep: 'crew_selection',
+                 inputData: {
+                   crew_index: extractedData?.crew_index || null,
+                   action: 'CREW_SELECTION_MANAGE',
+                   extracted_data: extractedData
+                 }
+               });
+               
                try {
                  const crewIndex = extractedData?.crew_index;
                  
@@ -8558,14 +11010,30 @@ if (is_host === true) {
                   const hasMore = totalCrews > (currentPage + 1) * pageSize;
                   const hasPrevious = currentPage > 0;
                   
+                  // Log invalid selection
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'manage_crew',
+                    workflowStep: 'invalid_crew_selection',
+                    executionStatus: 'failure',
+                    metadata: {
+                      crew_index: crewIndex,
+                      actual_index: actualIndex,
+                      total_crews: totalCrews,
+                      current_page: currentPage,
+                      error: 'invalid_selection'
+                    }
+                  });
+                  
                   responseContent = 'I didn\'t understand that. Reply with a crew number';
                   // Only show pagination actions if available
                   if (hasMore && hasPrevious) {
-                    responseContent += ', \'Next\' or \'N\', \'Prev\' or \'P\'';
+                    responseContent += ', \'Next\', \'Prev\'';
                   } else if (hasMore) {
-                    responseContent += ', \'Next\' or \'N\'';
+                    responseContent += ', \'Next\'';
                   } else if (hasPrevious) {
-                    responseContent += ', \'Prev\' or \'P\'';
+                    responseContent += ', \'Prev\'';
                   }
                   responseContent += ', \'Create Crew\', or \'exit\'.';
                   
@@ -8583,9 +11051,41 @@ if (is_host === true) {
                  
                  const selectedCrew = crewList[actualIndex];
                  
+                 // Log crew selected
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 'manage_crew',
+                   workflowStep: 'crew_selected',
+                   executionStatus: 'success',
+                   crewId: selectedCrew.id,
+                   metadata: {
+                     crew_id: selectedCrew.id,
+                     crew_name: selectedCrew.name,
+                     crew_index: crewIndex,
+                     actual_index: actualIndex,
+                     current_page: currentPage
+                   }
+                 });
+                 
                  // Validate ownership
                  const ownership = await validateCrewOwnership(supabase, selectedCrew.id, userId);
                  if (!ownership.isValid) {
+                   // Log ownership validation failure
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'ownership_validation',
+                     executionStatus: 'failure',
+                     crewId: selectedCrew.id,
+                     metadata: {
+                       crew_id: selectedCrew.id,
+                       crew_name: selectedCrew.name,
+                       error: 'permission_denied'
+                     }
+                   });
+                   
                    responseContent = 'You don\'t have permission to manage this crew.';
                    shouldSendSMS = true;
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -8599,8 +11099,37 @@ if (is_host === true) {
                    });
                  }
                  
+                 // Log ownership validation success
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 'manage_crew',
+                   workflowStep: 'ownership_validation',
+                   executionStatus: 'success',
+                   crewId: selectedCrew.id,
+                   metadata: {
+                     crew_id: selectedCrew.id,
+                     crew_name: selectedCrew.name
+                   }
+                 });
+                 
                  // Show crew members and menu
                  responseContent = await showCrewMembersAndMenu(supabase, userId, phone_number, send_sms, selectedCrew.id, selectedCrew.name, phone_number);
+                 
+                 // Log workflow completion
+                 logWorkflowComplete({
+                   supabase,
+                   userId,
+                   workflowName: 'manage_crew',
+                   workflowStep: 'crew_selection_completed',
+                   executionStatus: 'success',
+                   crewId: selectedCrew.id,
+                   outputData: {
+                     crew_id: selectedCrew.id,
+                     crew_name: selectedCrew.name,
+                     success: true
+                   }
+                 });
                  
                  return new Response(JSON.stringify({
                    success: true,
@@ -8612,6 +11141,19 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in CREW_SELECTION_MANAGE:', error);
+                 
+                 // Log workflow error
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'manage_crew',
+                   workflowStep: 'crew_selection_error',
+                   errorDetails: {
+                     error_message: error instanceof Error ? error.message : String(error),
+                     error_stack: error instanceof Error ? error.stack : undefined
+                   }
+                 });
+                 
                  responseContent = 'Failed to select crew. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -8674,13 +11216,13 @@ if (is_host === true) {
                 
                 // Only show pagination actions if available
                 if (hasMore && hasPrevious) {
-                  crewListText += ', \'Next\' or \'N\' for the next 5, \'Prev\' or \'P\' for the previous 5';
+                  crewListText += ', \'Next\' for the next 5, \'Prev\' for the previous 5';
                 } else if (hasMore) {
-                  crewListText += ', \'Next\' or \'N\' for the next 5';
+                  crewListText += ', \'Next\' for the next 5';
                 } else if (hasPrevious) {
-                  crewListText += ', \'Prev\' or \'P\' for the previous 5';
+                  crewListText += ', \'Prev\' for the previous 5';
                 }
-                crewListText += ', \'Done\' or \'D\' to return to menu, \'Create Crew\' to make a new one, or \'exit\'.';
+                crewListText += ', \'Done\' to return to menu, \'Create Crew\' to make a new one, or \'exit\'.';
                 
                 responseContent = crewListText;
                 shouldSendSMS = true;
@@ -8759,13 +11301,13 @@ if (is_host === true) {
                 
                 // Only show pagination actions if available
                 if (hasMore && hasPrevious) {
-                  crewListText += ', \'Next\' or \'N\' for the next 5, \'Prev\' or \'P\' for the previous 5';
+                  crewListText += ', \'Next\' for the next 5, \'Prev\' for the previous 5';
                 } else if (hasMore) {
-                  crewListText += ', \'Next\' or \'N\' for the next 5';
+                  crewListText += ', \'Next\' for the next 5';
                 } else if (hasPrevious) {
-                  crewListText += ', \'Prev\' or \'P\' for the previous 5';
+                  crewListText += ', \'Prev\' for the previous 5';
                 }
-                crewListText += ', \'Done\' or \'D\' to return to menu, \'Create Crew\' to make a new one, or \'exit\'.';
+                crewListText += ', \'Done\' to return to menu, \'Create Crew\' to make a new one, or \'exit\'.';
                 
                 responseContent = crewListText;
                 shouldSendSMS = true;
@@ -8810,6 +11352,20 @@ if (is_host === true) {
                }
              } else if (action === 'CREW_MANAGEMENT_MENU_SELECTION') {
                  console.log('CREW_MANAGEMENT_MENU_SELECTION detected via pattern matching');
+                 
+                 // Log workflow start
+                 logWorkflowStart({
+                   supabase,
+                   userId,
+                   workflowName: 'manage_crew',
+                   workflowStep: 'menu_selection',
+                   inputData: {
+                     menu_option: extractedData?.menu_option || null,
+                     action: 'CREW_MANAGEMENT_MENU_SELECTION',
+                     extracted_data: extractedData
+                   }
+                 });
+                 
                  try {
                    const menuOption = extractedData?.menu_option;
                    const crewData = conversationState?.extracted_data?.[0];
@@ -8817,6 +11373,19 @@ if (is_host === true) {
                    const crewName = crewData?.crew_name;
                  
                  if (!crewId || !crewName) {
+                   // Log missing crew data
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_selection_validation',
+                     executionStatus: 'failure',
+                     metadata: {
+                       menu_option: menuOption,
+                       error: 'missing_crew_data'
+                     }
+                   });
+                   
                    responseContent = 'I didn\'t understand that. Reply with a number (1-9), or type \'exit\'.';
                    shouldSendSMS = true;
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -8833,6 +11402,22 @@ if (is_host === true) {
                  // Validate ownership
                  const ownership = await validateCrewOwnership(supabase, crewId, userId);
                  if (!ownership.isValid) {
+                   // Log ownership validation failure
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_selection_ownership_validation',
+                     executionStatus: 'failure',
+                     crewId: crewId,
+                     metadata: {
+                       menu_option: menuOption,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       error: 'permission_denied'
+                     }
+                   });
+                   
                    responseContent = 'You don\'t have permission to manage this crew.';
                    shouldSendSMS = true;
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -8848,6 +11433,22 @@ if (is_host === true) {
                  
                  // Validate menu option range (1-9)
                  if (menuOption < 1 || menuOption > 9) {
+                   // Log invalid menu option
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_selection_validation',
+                     executionStatus: 'failure',
+                     crewId: crewId,
+                     metadata: {
+                       menu_option: menuOption,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       error: 'invalid_menu_option'
+                     }
+                   });
+                   
                    // Show error message only (don't re-display menu)
                    responseContent = `I didn't understand that. Reply with a number (1-9), or type 'exit'.`;
                    shouldSendSMS = true;
@@ -8862,9 +11463,40 @@ if (is_host === true) {
                    });
                  }
                  
+                 // Log menu option selected
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 'manage_crew',
+                   workflowStep: 'menu_option_selected',
+                   executionStatus: 'success',
+                   crewId: crewId,
+                   metadata: {
+                     menu_option: menuOption,
+                     crew_id: crewId,
+                     crew_name: crewName
+                   }
+                 });
+                 
                  // Route to appropriate handler based on menu option
                  if (menuOption === 1) {
                    // Add Members - jump to ADD_CREW_MEMBERS
+                   // Log option 1 selected
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_option_1_add_members',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     metadata: {
+                       menu_option: 1,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       action: 'transition_to_add_members'
+                     }
+                   });
+                   
                    await supabase
                      .from('conversation_state')
                      .upsert({
@@ -8884,6 +11516,24 @@ if (is_host === true) {
                   const joinLink = await getCrewJoinLink(supabase, crewId);
                   responseContent = `To add members to ${crewName}:\n\nType a name already in Funlet: Tom\nType a name and number for a new crew member: Tom 4155551234\nShare link for people to add themselves: ${joinLink}\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
                    shouldSendSMS = true;
+                   
+                   // Log workflow completion
+                   logWorkflowComplete({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_option_1_completed',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     outputData: {
+                       menu_option: 1,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       action: 'ADD_CREW_MEMBERS',
+                       success: true
+                     }
+                   });
+                   
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
                    return new Response(JSON.stringify({
                      success: true,
@@ -8895,14 +11545,64 @@ if (is_host === true) {
                    });
                  } else if (menuOption === 2) {
                    // Remove Members - start sub-flow
+                   // Log option 2 selected
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_option_2_remove_members',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     metadata: {
+                       menu_option: 2,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       action: 'show_remove_members_list'
+                     }
+                   });
+                   
                    const memberList = crewData?.member_list || [];
                    
                    if (memberList.length === 0) {
+                     // Log no members to remove
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'manage_crew',
+                       workflowStep: 'menu_option_2_no_members',
+                       executionStatus: 'success',
+                       crewId: crewId,
+                       metadata: {
+                         menu_option: 2,
+                         crew_id: crewId,
+                         crew_name: crewName,
+                         member_count: 0
+                       }
+                     });
+                     
                      responseContent = `${crewName} has no members to remove.`;
                      shouldSendSMS = true;
                      await sendSMS(phone_number, responseContent, send_sms, phone_number);
                      // Re-show menu
                      responseContent = await showCrewMembersAndMenu(supabase, userId, phone_number, send_sms, crewId, crewName, phone_number);
+                     
+                     // Log workflow completion
+                     logWorkflowComplete({
+                       supabase,
+                       userId,
+                       workflowName: 'manage_crew',
+                       workflowStep: 'menu_option_2_completed',
+                       executionStatus: 'success',
+                       crewId: crewId,
+                       outputData: {
+                         menu_option: 2,
+                         crew_id: crewId,
+                         crew_name: crewName,
+                         result: 'no_members_to_remove',
+                         success: true
+                       }
+                     });
+                     
                      return new Response(JSON.stringify({
                        success: true,
                        action: 'CREW_MANAGEMENT_MENU_SELECTION',
@@ -8919,7 +11619,7 @@ if (is_host === true) {
                      memberList.forEach((member, index) => {
                        memberListText += `${index + 1}. ${member.name}\n`;
                      });
-                     memberListText += '\nReply with numbers (e.g. \'2\' or \'1 3\'), or type \'Done\' or \'D\' to return to menu.';
+                     memberListText += '\nReply with numbers (e.g. \'2\' or \'1 3\'), or type \'Done\' to return to menu.';
                      responseContent = memberListText;
                   } else {
                     // Show first 5 with pagination
@@ -8937,15 +11637,32 @@ if (is_host === true) {
                     memberListText += '\nReply with numbers';
                     // Only show pagination actions if available
                     if (hasMore && hasPrevious) {
-                      memberListText += ', \'Next\' or \'N\' for next 5, \'Prev\' or \'P\' for previous 5';
+                      memberListText += ', \'Next\' for next 5, \'Prev\' for previous 5';
                     } else if (hasMore) {
-                      memberListText += ', \'Next\' or \'N\' for next 5';
+                      memberListText += ', \'Next\' for next 5';
                     } else if (hasPrevious) {
-                      memberListText += ', \'Prev\' or \'P\' for previous 5';
+                      memberListText += ', \'Prev\' for previous 5';
                     }
-                    memberListText += ', or type \'Done\' or \'D\' to return to menu.';
+                    memberListText += ', or type \'Done\' to return to menu.';
                     responseContent = memberListText;
                   }
+                   
+                   // Log showing remove members list
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_option_2_show_member_list',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     metadata: {
+                       menu_option: 2,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       member_count: memberList.length,
+                       has_pagination: memberList.length > 5
+                     }
+                   });
                    
                    shouldSendSMS = true;
                    await supabase
@@ -8964,6 +11681,24 @@ if (is_host === true) {
                      .eq('user_id', userId);
                    
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                   
+                   // Log workflow completion
+                   logWorkflowComplete({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_option_2_completed',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     outputData: {
+                       menu_option: 2,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       action: 'remove_members_selection',
+                       success: true
+                     }
+                   });
+                   
                    return new Response(JSON.stringify({
                      success: true,
                      action: 'CREW_MANAGEMENT_MENU_SELECTION',
@@ -8974,6 +11709,22 @@ if (is_host === true) {
                    });
                  } else if (menuOption === 3) {
                    // Rename Crew - start sub-flow
+                   // Log option 3 selected
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_option_3_rename_crew',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     metadata: {
+                       menu_option: 3,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       action: 'prompt_for_new_name'
+                     }
+                   });
+                   
                    responseContent = `What's the new name for ${crewName}? (Type 'Done' to cancel.)`;
                    shouldSendSMS = true;
                    await supabase
@@ -8991,6 +11742,24 @@ if (is_host === true) {
                      }, {
                        onConflict: 'user_id'
                      });
+                   
+                   // Log workflow completion
+                   logWorkflowComplete({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_option_3_completed',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     outputData: {
+                       menu_option: 3,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       action: 'rename_crew_prompt',
+                       success: true
+                     }
+                   });
+                   
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
                    return new Response(JSON.stringify({
                      success: true,
@@ -9002,6 +11771,22 @@ if (is_host === true) {
                    });
                  } else if (menuOption === 4) {
                    // Create Event - jump to SEND_INVITATIONS (exit)
+                   // Log option 4 selected (full logging for SEND_INVITATIONS will be implemented later)
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_option_4_create_event',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     metadata: {
+                       menu_option: 4,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       action: 'transition_to_send_invitations'
+                     }
+                   });
+                   
                    // Update state and then execute the create event flow directly
                    await supabase
                      .from('conversation_state')
@@ -9051,6 +11836,23 @@ if (is_host === true) {
                      })
                      .eq('user_id', userId);
                    
+                   // Log workflow completion
+                   logWorkflowComplete({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_option_4_completed',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     outputData: {
+                       menu_option: 4,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       action: 'SEND_INVITATIONS_WITH_CURRENT_CREW',
+                       success: true
+                     }
+                   });
+                   
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
                    
                    return new Response(JSON.stringify({
@@ -9063,6 +11865,22 @@ if (is_host === true) {
                    });
                  } else if (menuOption === 5) {
                    // Sync Up - jump to SYNC_UP (exit)
+                   // Log option 5 selected (full logging for SYNC_UP will be implemented later)
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_option_5_sync_up',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     metadata: {
+                       menu_option: 5,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       action: 'transition_to_sync_up'
+                     }
+                   });
+                   
                    // Execute the sync up flow directly with crew pre-selected
                    responseContent = "Sync Up helps find times that work for everyone. I'll ask for event details and time options, then your crew votes on what works best.\n\nWhat's the event name?";
                    shouldSendSMS = true;
@@ -9087,6 +11905,23 @@ if (is_host === true) {
                      })
                      .eq('user_id', userId);
                    
+                   // Log workflow completion
+                   logWorkflowComplete({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_option_5_completed',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     outputData: {
+                       menu_option: 5,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       action: 'SYNC_UP',
+                       success: true
+                     }
+                   });
+                   
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
                    
                    return new Response(JSON.stringify({
@@ -9099,6 +11934,22 @@ if (is_host === true) {
                    });
                  } else if (menuOption === 6) {
                    // Get Crew Link - show link, return to menu
+                   // Log option 6 selected
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_option_6_get_crew_link',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     metadata: {
+                       menu_option: 6,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       action: 'get_crew_link'
+                     }
+                   });
+                   
                    const joinLink = await getCrewJoinLink(supabase, crewId);
                    const linkMessage = `Join link for ${crewName}: ${joinLink}\n\nShare this link for people to join your crew.`;
                    shouldSendSMS = true;
@@ -9107,6 +11958,24 @@ if (is_host === true) {
                    const menuDisplay = await showCrewMembersAndMenu(supabase, userId, phone_number, send_sms, crewId, crewName, phone_number);
                    // Combine link message and menu
                    responseContent = `${linkMessage}\n\n${menuDisplay}`;
+                   
+                   // Log workflow completion
+                   logWorkflowComplete({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_option_6_completed',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     outputData: {
+                       menu_option: 6,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       action: 'get_crew_link',
+                       success: true
+                     }
+                   });
+                   
                    return new Response(JSON.stringify({
                      success: true,
                      action: 'CREW_MANAGEMENT_MENU_SELECTION',
@@ -9117,6 +11986,22 @@ if (is_host === true) {
                    });
                  } else if (menuOption === 7) {
                    // Get QR Code - show QR, return to menu
+                   // Log option 7 selected
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_option_7_get_qr_code',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     metadata: {
+                       menu_option: 7,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       action: 'get_qr_code'
+                     }
+                   });
+                   
                    const joinLink = await getCrewJoinLink(supabase, crewId);
                    const qrUrl = `${joinLink}/qr`;
                    const qrMessage = `QR code for ${crewName}: ${qrUrl}\n\nShare this QR code for people to join your crew.`;
@@ -9126,6 +12011,24 @@ if (is_host === true) {
                    const menuDisplay = await showCrewMembersAndMenu(supabase, userId, phone_number, send_sms, crewId, crewName, phone_number);
                    // Combine QR message and menu
                    responseContent = `${qrMessage}\n\n${menuDisplay}`;
+                   
+                   // Log workflow completion
+                   logWorkflowComplete({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_option_7_completed',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     outputData: {
+                       menu_option: 7,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       action: 'get_qr_code',
+                       success: true
+                     }
+                   });
+                   
                    return new Response(JSON.stringify({
                      success: true,
                      action: 'CREW_MANAGEMENT_MENU_SELECTION',
@@ -9136,6 +12039,22 @@ if (is_host === true) {
                    });
                  } else if (menuOption === 8) {
                    // Delete Crew - start confirmation sub-flow
+                   // Log option 8 selected
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_option_8_delete_crew',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     metadata: {
+                       menu_option: 8,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       action: 'delete_crew_confirmation_prompt'
+                     }
+                   });
+                   
                    responseContent = `Delete ${crewName}? This will remove the crew and all its members. Type 'delete' to confirm or 'Done' to cancel.`;
                    shouldSendSMS = true;
                    await supabase
@@ -9150,6 +12069,24 @@ if (is_host === true) {
                        }]
                      })
                      .eq('user_id', userId);
+                   
+                   // Log workflow completion
+                   logWorkflowComplete({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_option_8_completed',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     outputData: {
+                       menu_option: 8,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       action: 'delete_crew_confirmation_prompt',
+                       success: true
+                     }
+                   });
+                   
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
                    return new Response(JSON.stringify({
                      success: true,
@@ -9161,6 +12098,22 @@ if (is_host === true) {
                    });
                  } else if (menuOption === 9) {
                    // Exit - clear state and end
+                   // Log option 9 selected
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_option_9_exit',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     metadata: {
+                       menu_option: 9,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       action: 'exit_crew_management'
+                     }
+                   });
+                   
                    await supabase
                      .from('conversation_state')
                      .update({
@@ -9171,6 +12124,24 @@ if (is_host === true) {
                      .eq('user_id', userId);
                    responseContent = 'Exited crew management.';
                    shouldSendSMS = true;
+                   
+                   // Log workflow completion
+                   logWorkflowComplete({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_option_9_completed',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     outputData: {
+                       menu_option: 9,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       action: 'exit_crew_management',
+                       success: true
+                     }
+                   });
+                   
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
                    return new Response(JSON.stringify({
                      success: true,
@@ -9181,6 +12152,22 @@ if (is_host === true) {
                      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
                    });
                  } else {
+                   // Log invalid menu option (shouldn't reach here due to validation above, but just in case)
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'manage_crew',
+                     workflowStep: 'menu_selection_invalid_option',
+                     executionStatus: 'failure',
+                     crewId: crewId,
+                     metadata: {
+                       menu_option: menuOption,
+                       crew_id: crewId,
+                       crew_name: crewName,
+                       error: 'invalid_option'
+                     }
+                   });
+                   
                    responseContent = 'I didn\'t understand that. Reply with a number (1-9), or type \'exit\'.';
                    shouldSendSMS = true;
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9195,6 +12182,20 @@ if (is_host === true) {
                  }
               } catch (error) {
                 console.error('Error in CREW_MANAGEMENT_MENU_SELECTION:', error);
+                
+                // Log workflow error
+                logWorkflowError({
+                  supabase,
+                  userId,
+                  workflowName: 'manage_crew',
+                  workflowStep: 'menu_selection_error',
+                  errorDetails: {
+                    error_message: error instanceof Error ? error.message : String(error),
+                    error_stack: error instanceof Error ? error.stack : undefined,
+                    menu_option: extractedData?.menu_option || null
+                  }
+                });
+                
                 responseContent = 'Failed to process menu selection. Please try again.';
                 shouldSendSMS = true;
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9212,6 +12213,18 @@ if (is_host === true) {
               try {
                 const searchQuery = extractedData?.search_query;
                 
+                // Log workflow start
+                await logWorkflowStart({
+                  supabase,
+                  userId,
+                  workflowName: 'edit_contact',
+                  workflowStep: 'initiated',
+                  metadata: {
+                    user_message: message,
+                    search_query: searchQuery || null
+                  }
+                });
+                
                 // Count user's contacts
                 const { count: contactCount, error: countError } = await supabase
                   .from('contacts')
@@ -9220,8 +12233,30 @@ if (is_host === true) {
                 
                 if (countError) throw countError;
                 
+                // Log contact count fetch
+                await logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'edit_contact',
+                  workflowStep: 'fetch_user_contacts',
+                  executionStatus: 'success',
+                  metadata: {
+                    contact_count: contactCount || 0
+                  }
+                });
+                
                 // If no contacts
                 if (!contactCount || contactCount === 0) {
+                  await logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'edit_contact',
+                    workflowStep: 'no_contacts_found',
+                    executionStatus: 'success',
+                    metadata: {
+                      suggested_action: 'CREATE_CREW_OR_ADD_MEMBERS'
+                    }
+                  });
                   responseContent = 'No contacts found. Add people by creating a crew or adding members to an existing crew.';
                   shouldSendSMS = true;
                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9249,9 +12284,32 @@ if (is_host === true) {
                 
                 // If search query provided
                 if (searchQuery) {
+                  await logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'edit_contact',
+                    workflowStep: 'contact_name_search',
+                    executionStatus: 'success',
+                    metadata: {
+                      search_query: searchQuery
+                    }
+                  });
+                  
                   const contacts = await searchUserContacts(supabase, userId, searchQuery);
                   
                   if (contacts.length === 0) {
+                    await logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'edit_contact',
+                      workflowStep: 'contact_not_found_by_name',
+                      executionStatus: 'success',
+                      metadata: {
+                        search_query: searchQuery,
+                        total_matches: 0
+                      }
+                    });
+                    
                     responseContent = `No contacts found for '${searchQuery}'. Try another name or type 'exit'.`;
                     shouldSendSMS = true;
                     await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9280,6 +12338,20 @@ if (is_host === true) {
                   
                   // Exactly 1 match - go directly to actions menu
                   if (contacts.length === 1) {
+                    await logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'edit_contact',
+                      workflowStep: 'single_match_found',
+                      executionStatus: 'success',
+                      metadata: {
+                        contact_id: contacts[0].id,
+                        contact_name: `${contacts[0].first_name}${contacts[0].last_name ? ' ' + contacts[0].last_name : ''}`,
+                        search_query: searchQuery,
+                        total_matches: 1
+                      }
+                    });
+                    
                     responseContent = await showContactActionsMenu(supabase, userId, phone_number, send_sms, contacts[0].id, phone_number);
                     return new Response(JSON.stringify({
                       success: true,
@@ -9292,6 +12364,20 @@ if (is_host === true) {
                   
                   // Multiple matches - show list (up to 5)
                   const displayContacts = contacts.slice(0, 5);
+                  
+                  await logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'edit_contact',
+                    workflowStep: 'multiple_matches_found',
+                    executionStatus: 'success',
+                    metadata: {
+                      search_query: searchQuery,
+                      total_matches: contacts.length,
+                      showing_count: displayContacts.length
+                    }
+                  });
+                  
                   let contactList = `Found these contacts:\n\n`;
                   for (let i = 0; i < displayContacts.length; i++) {
                     const displayText = await formatContactDisplay(displayContacts[i]);
@@ -9302,6 +12388,18 @@ if (is_host === true) {
                   responseContent = contactList;
                   shouldSendSMS = true;
                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                  
+                  await logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'edit_contact',
+                    workflowStep: 'show_contact_list',
+                    executionStatus: 'success',
+                    metadata: {
+                      total_contacts: contacts.length,
+                      showing_count: displayContacts.length
+                    }
+                  });
                   
                   // Save search results in state
                   await supabase
@@ -9332,6 +12430,17 @@ if (is_host === true) {
                 }
                 
                 // No search query - prompt for name
+                await logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'edit_contact',
+                  workflowStep: 'contact_search_no_query',
+                  executionStatus: 'success',
+                  metadata: {
+                    prompt_for_input: true
+                  }
+                });
+                
                 responseContent = 'Type part or all of the name of the person to edit, or type \'exit\'.';
                 shouldSendSMS = true;
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9358,6 +12467,16 @@ if (is_host === true) {
                 
               } catch (error) {
                 console.error('Error in EDIT_CONTACT:', error);
+                await logWorkflowError({
+                  supabase,
+                  userId,
+                  workflowName: 'edit_contact',
+                  workflowStep: 'error',
+                  errorDetails: {
+                    error_message: error instanceof Error ? error.message : String(error),
+                    action: 'EDIT_CONTACT'
+                  }
+                });
                 responseContent = 'Failed to search contacts. Please try again.';
                 shouldSendSMS = true;
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9376,9 +12495,45 @@ if (is_host === true) {
                 
                 if (action === 'EDIT_CONTACT_SEARCH') {
                   const searchQuery = extractedData?.search_query;
+                  
+                  await logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'edit_contact',
+                    workflowStep: 'contact_search_input',
+                    executionStatus: 'success',
+                    metadata: {
+                      search_query: searchQuery
+                    }
+                  });
+                  
                   const contacts = await searchUserContacts(supabase, userId, searchQuery);
                   
+                  await logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'edit_contact',
+                    workflowStep: 'contact_search_results',
+                    executionStatus: 'success',
+                    metadata: {
+                      search_query: searchQuery,
+                      total_matches: contacts.length
+                    }
+                  });
+                  
                   if (contacts.length === 0) {
+                    await logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'edit_contact',
+                      workflowStep: 'contact_not_found_by_name',
+                      executionStatus: 'success',
+                      metadata: {
+                        search_query: searchQuery,
+                        total_matches: 0
+                      }
+                    });
+                    
                     responseContent = `No contacts found for '${searchQuery}'. Try another name or type 'exit'.`;
                     shouldSendSMS = true;
                     await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9392,8 +12547,35 @@ if (is_host === true) {
                   }
                   
                   if (contacts.length === 1) {
+                    await logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'edit_contact',
+                      workflowStep: 'single_match_found',
+                      executionStatus: 'success',
+                      metadata: {
+                        contact_id: contacts[0].id,
+                        contact_name: `${contacts[0].first_name}${contacts[0].last_name ? ' ' + contacts[0].last_name : ''}`,
+                        search_query: searchQuery,
+                        total_matches: 1
+                      }
+                    });
+                    
                     contactId = contacts[0].id;
                   } else {
+                    await logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'edit_contact',
+                      workflowStep: 'multiple_matches_found',
+                      executionStatus: 'success',
+                      metadata: {
+                        search_query: searchQuery,
+                        total_matches: contacts.length,
+                        showing_count: 5
+                      }
+                    });
+                    
                     // Show list
                     const displayContacts = contacts.slice(0, 5);
                     let contactList = `Found these contacts:\n\n`;
@@ -9406,6 +12588,18 @@ if (is_host === true) {
                     responseContent = contactList;
                     shouldSendSMS = true;
                     await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                    
+                    await logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'edit_contact',
+                      workflowStep: 'show_contact_list',
+                      executionStatus: 'success',
+                      metadata: {
+                        total_contacts: contacts.length,
+                        showing_count: displayContacts.length
+                      }
+                    });
                     
                     await supabase
                       .from('conversation_state')
@@ -9437,6 +12631,18 @@ if (is_host === true) {
                   const contactList = conversationState?.extracted_data?.[0]?.contact_list || [];
                   
                   if (contactIndex < 0 || contactIndex >= contactList.length) {
+                    await logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'edit_contact',
+                      workflowStep: 'contact_selection_invalid',
+                      executionStatus: 'success',
+                      metadata: {
+                        contact_index: contactIndex,
+                        error: 'invalid_index'
+                      }
+                    });
+                    
                     responseContent = 'I didn\'t understand that. Reply with a number or type \'exit\'.';
                     shouldSendSMS = true;
                     await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9450,6 +12656,19 @@ if (is_host === true) {
                   }
                   
                   contactId = contactList[contactIndex].id;
+                  
+                  await logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'edit_contact',
+                    workflowStep: 'contact_selected',
+                    executionStatus: 'success',
+                    metadata: {
+                      contact_id: contactId,
+                      contact_name: contactList[contactIndex].name,
+                      contact_index: contactIndex
+                    }
+                  });
                 }
                 
                 // Show contact actions menu
@@ -9464,6 +12683,16 @@ if (is_host === true) {
                 
               } catch (error) {
                 console.error(`Error in ${action}:`, error);
+                await logWorkflowError({
+                  supabase,
+                  userId,
+                  workflowName: 'edit_contact',
+                  workflowStep: 'error',
+                  errorDetails: {
+                    error_message: error instanceof Error ? error.message : String(error),
+                    action: action
+                  }
+                });
                 responseContent = 'Failed to select contact. Please try again.';
                 shouldSendSMS = true;
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9497,8 +12726,34 @@ if (is_host === true) {
                   });
                 }
                 
+                // Log menu option selection
+                await logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'edit_contact',
+                  workflowStep: 'menu_option_selected',
+                  executionStatus: 'success',
+                  metadata: {
+                    contact_id: contactId,
+                    contact_name: contactName,
+                    menu_option: menuOption.toString()
+                  }
+                });
+                
                 switch (menuOption) {
                   case 1: // Edit Name
+                    await logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'edit_contact',
+                      workflowStep: 'edit_name_initiated',
+                      executionStatus: 'success',
+                      metadata: {
+                        contact_id: contactId,
+                        contact_name: contactName
+                      }
+                    });
+                    
                     responseContent = 'Enter the new name for this contact, or type \'exit\'.';
                     shouldSendSMS = true;
                     await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9521,6 +12776,19 @@ if (is_host === true) {
                       .single();
                     
                     if (profile && profile.phone_number === contactPhone) {
+                      await logWorkflowProgress({
+                        supabase,
+                        userId,
+                        workflowName: 'edit_contact',
+                        workflowStep: 'edit_phone_own_number_blocked',
+                        executionStatus: 'success',
+                        metadata: {
+                          contact_id: contactId,
+                          contact_phone: contactPhone,
+                          error: 'cannot_edit_own_phone'
+                        }
+                      });
+                      
                       responseContent = 'You cannot edit your own phone number through this feature.';
                       shouldSendSMS = true;
                       await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9529,6 +12797,18 @@ if (is_host === true) {
                       responseContent = await showContactActionsMenu(supabase, userId, phone_number, send_sms, contactId, phone_number);
                       break;
                     }
+                    
+                    await logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'edit_contact',
+                      workflowStep: 'edit_phone_initiated',
+                      executionStatus: 'success',
+                      metadata: {
+                        contact_id: contactId,
+                        contact_phone: contactPhone
+                      }
+                    });
                     
                     responseContent = 'Enter the new phone number (digits only), or type \'back\' or \'exit\'.';
                     shouldSendSMS = true;
@@ -9544,6 +12824,19 @@ if (is_host === true) {
                     break;
                     
                   case 3: // Delete Contact
+                    await logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'edit_contact',
+                      workflowStep: 'delete_contact_initiated',
+                      executionStatus: 'success',
+                      metadata: {
+                        contact_id: contactId,
+                        contact_name: contactName,
+                        contact_phone: contactPhone
+                      }
+                    });
+                    
                     responseContent = `Delete ${contactName} — (${formatPhoneNumberForDisplay(contactPhone)}) from all crews and events? Type 'delete' to confirm or 'back' to cancel.`;
                     shouldSendSMS = true;
                     await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9558,6 +12851,17 @@ if (is_host === true) {
                     break;
                     
                   case 4: // Exit
+                    await logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'edit_contact',
+                      workflowStep: 'menu_exit',
+                      executionStatus: 'success',
+                      metadata: {
+                        contact_id: contactId
+                      }
+                    });
+                    
                     responseContent = 'Exited contact editing.';
                     shouldSendSMS = true;
                     await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9575,6 +12879,19 @@ if (is_host === true) {
                     break;
                     
                   default:
+                    await logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'edit_contact',
+                      workflowStep: 'menu_option_invalid',
+                      executionStatus: 'success',
+                      metadata: {
+                        contact_id: contactId,
+                        menu_option: menuOption?.toString(),
+                        error: 'invalid_option'
+                      }
+                    });
+                    
                     responseContent = 'I didn\'t understand that. Reply with a number (1-4), or type \'exit\'.';
                     shouldSendSMS = true;
                     await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9590,6 +12907,16 @@ if (is_host === true) {
                 
               } catch (error) {
                 console.error('Error in EDIT_CONTACT_MENU_SELECTION:', error);
+                await logWorkflowError({
+                  supabase,
+                  userId,
+                  workflowName: 'edit_contact',
+                  workflowStep: 'error',
+                  errorDetails: {
+                    error_message: error instanceof Error ? error.message : String(error),
+                    action: 'EDIT_CONTACT_MENU_SELECTION'
+                  }
+                });
                 responseContent = 'Failed to process selection. Please try again.';
                 shouldSendSMS = true;
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9603,6 +12930,21 @@ if (is_host === true) {
               }
             } else if (action === 'EDIT_CONTACT_MENU_INVALID_SELECTION') {
               console.log('EDIT_CONTACT_MENU_INVALID_SELECTION detected via pattern matching');
+              
+              const contactData = conversationState?.extracted_data?.[0];
+              const contactId = contactData?.contact_id;
+              
+              await logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'edit_contact',
+                workflowStep: 'menu_option_invalid',
+                executionStatus: 'success',
+                metadata: {
+                  contact_id: contactId,
+                  error: 'invalid_option'
+                }
+              });
               
               responseContent = `I didn't understand that. Reply with a number (1-4), or type 'exit'.`;
               shouldSendSMS = true;
@@ -9627,6 +12969,21 @@ if (is_host === true) {
               });
             } else if (action === 'EDIT_CONTACT_NAME_INPUT_INVALID') {
               console.log('EDIT_CONTACT_NAME_INPUT_INVALID detected via pattern matching');
+              
+              const contactData = conversationState?.extracted_data?.[0];
+              const contactId = contactData?.contact_id;
+              
+              await logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'edit_contact',
+                workflowStep: 'edit_name_invalid',
+                executionStatus: 'success',
+                metadata: {
+                  contact_id: contactId,
+                  error: 'blank_or_invalid_input'
+                }
+              });
               
               responseContent = `I didn't understand that. Enter a new name or type 'exit'.`;
               shouldSendSMS = true;
@@ -9655,8 +13012,21 @@ if (is_host === true) {
                 const newName = extractedData?.new_name;
                 const contactData = conversationState?.extracted_data?.[0];
                 const contactId = contactData?.contact_id;
+                const oldName = contactData?.contact_name;
                 
                 if (!newName || newName.length === 0) {
+                  await logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'edit_contact',
+                    workflowStep: 'edit_name_invalid',
+                    executionStatus: 'success',
+                    metadata: {
+                      contact_id: contactId,
+                      error: 'blank_input'
+                    }
+                  });
+                  
                   responseContent = 'I didn\'t understand that. Enter a new name or type \'exit\'.';
                   shouldSendSMS = true;
                   
@@ -9683,6 +13053,21 @@ if (is_host === true) {
                 const nameParts = newName.split(' ');
                 const firstName = nameParts[0];
                 const lastName = nameParts.slice(1).join(' ') || '';
+                const fullNewName = `${firstName}${lastName ? ' ' + lastName : ''}`;
+                
+                await logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'edit_contact',
+                  workflowStep: 'edit_name_input',
+                  executionStatus: 'success',
+                  metadata: {
+                    contact_id: contactId,
+                    input_value: newName,
+                    parsed_first_name: firstName,
+                    parsed_last_name: lastName
+                  }
+                });
                 
                 // Update contact name
                 const { error: updateError } = await supabase
@@ -9696,7 +13081,20 @@ if (is_host === true) {
                 
                 if (updateError) throw updateError;
                 
-                responseContent = `Updated contact name to ${firstName}${lastName ? ' ' + lastName : ''}.`;
+                await logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'edit_contact',
+                  workflowStep: 'edit_name_completed',
+                  executionStatus: 'success',
+                  metadata: {
+                    contact_id: contactId,
+                    old_name: oldName,
+                    new_name: fullNewName
+                  }
+                });
+                
+                responseContent = `Updated contact name to ${fullNewName}.`;
                 shouldSendSMS = true;
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
                 
@@ -9713,6 +13111,16 @@ if (is_host === true) {
                 
               } catch (error) {
                 console.error('Error in EDIT_CONTACT_NAME_INPUT:', error);
+                await logWorkflowError({
+                  supabase,
+                  userId,
+                  workflowName: 'edit_contact',
+                  workflowStep: 'error',
+                  errorDetails: {
+                    error_message: error instanceof Error ? error.message : String(error),
+                    action: 'EDIT_CONTACT_NAME_INPUT'
+                  }
+                });
                 responseContent = 'Failed to update name. Please try again.';
                 shouldSendSMS = true;
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9730,9 +13138,23 @@ if (is_host === true) {
                 const newPhone = extractedData?.new_phone;
                 const contactData = conversationState?.extracted_data?.[0];
                 const contactId = contactData?.contact_id;
+                const oldPhone = contactData?.contact_phone;
                 
                 // Validate phone format (must be 10 digits)
                 if (!newPhone || newPhone.length !== 10) {
+                  await logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'edit_contact',
+                    workflowStep: 'edit_phone_invalid_format',
+                    executionStatus: 'success',
+                    metadata: {
+                      contact_id: contactId,
+                      input_value: newPhone,
+                      error: 'invalid_format'
+                    }
+                  });
+                  
                   responseContent = 'I didn\'t understand that. Enter a 10-digit phone number, or type \'back\' or \'exit\'.';
                   shouldSendSMS = true;
                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9748,6 +13170,19 @@ if (is_host === true) {
                 // Format as +1XXXXXXXXXX
                 const formattedPhone = `+1${newPhone}`;
                 
+                await logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'edit_contact',
+                  workflowStep: 'edit_phone_input',
+                  executionStatus: 'success',
+                  metadata: {
+                    contact_id: contactId,
+                    input_value: newPhone,
+                    formatted_phone: formattedPhone
+                  }
+                });
+                
                 // Check if phone belongs to another contact
                 const { data: existingContact } = await supabase
                   .from('contacts')
@@ -9758,6 +13193,20 @@ if (is_host === true) {
                   .maybeSingle();
                 
                 if (existingContact) {
+                  await logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'edit_contact',
+                    workflowStep: 'edit_phone_duplicate_detected',
+                    executionStatus: 'success',
+                    metadata: {
+                      contact_id: contactId,
+                      formatted_phone: formattedPhone,
+                      existing_contact_id: existingContact.id,
+                      error: 'duplicate_phone'
+                    }
+                  });
+                  
                   responseContent = 'That number is already used by another contact. Enter a different number, or type \'Done\' or \'exit\'.';
                   shouldSendSMS = true;
                   
@@ -9791,6 +13240,19 @@ if (is_host === true) {
                 
                 if (updateError) throw updateError;
                 
+                await logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'edit_contact',
+                  workflowStep: 'edit_phone_completed',
+                  executionStatus: 'success',
+                  metadata: {
+                    contact_id: contactId,
+                    old_phone: oldPhone,
+                    new_phone: formattedPhone
+                  }
+                });
+                
                 responseContent = `Updated phone number to (${formatPhoneNumberForDisplay(formattedPhone)}).`;
                 shouldSendSMS = true;
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9808,6 +13270,16 @@ if (is_host === true) {
                 
               } catch (error) {
                 console.error('Error in EDIT_CONTACT_PHONE_INPUT:', error);
+                await logWorkflowError({
+                  supabase,
+                  userId,
+                  workflowName: 'edit_contact',
+                  workflowStep: 'error',
+                  errorDetails: {
+                    error_message: error instanceof Error ? error.message : String(error),
+                    action: 'EDIT_CONTACT_PHONE_INPUT'
+                  }
+                });
                 responseContent = 'Failed to update phone number. Please try again.';
                 shouldSendSMS = true;
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9824,6 +13296,17 @@ if (is_host === true) {
               const contactData = conversationState?.extracted_data?.[0];
               const contactId = contactData?.contact_id;
               
+              await logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'edit_contact',
+                workflowStep: 'back_to_menu',
+                executionStatus: 'success',
+                metadata: {
+                  contact_id: contactId
+                }
+              });
+              
               responseContent = await showContactActionsMenu(supabase, userId, phone_number, send_sms, contactId, phone_number);
               
               return new Response(JSON.stringify({
@@ -9835,6 +13318,22 @@ if (is_host === true) {
               });
             } else if (action === 'EDIT_CONTACT_DELETE_INVALID') {
               console.log('EDIT_CONTACT_DELETE_INVALID detected');
+              
+              const contactData = conversationState?.extracted_data?.[0];
+              const contactId = contactData?.contact_id;
+              
+              await logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'edit_contact',
+                workflowStep: 'delete_contact_invalid',
+                executionStatus: 'success',
+                metadata: {
+                  contact_id: contactId,
+                  error: 'invalid_confirmation'
+                }
+              });
+              
               responseContent = `I didn't understand that. Type 'delete' to confirm or 'Done'.`;
               shouldSendSMS = true;
               await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9863,6 +13362,19 @@ if (is_host === true) {
                 const contactName = contactData?.contact_name;
                 const contactPhone = contactData?.contact_phone;
                 
+                await logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'edit_contact',
+                  workflowStep: 'delete_contact_initiated',
+                  executionStatus: 'success',
+                  metadata: {
+                    contact_id: contactId,
+                    contact_name: contactName,
+                    contact_phone: contactPhone
+                  }
+                });
+                
                 // Verify contact belongs to current user before deletion
                 const { data: contactOwnershipData, error: contactCheckError } = await supabase
                   .from('contacts')
@@ -9872,6 +13384,19 @@ if (is_host === true) {
                   .single();
 
                 if (contactCheckError || !contactOwnershipData) {
+                  await logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'edit_contact',
+                    workflowStep: 'delete_contact_ownership_failed',
+                    executionStatus: 'success',
+                    metadata: {
+                      contact_id: contactId,
+                      error: 'ownership_verification_failed',
+                      error_details: contactCheckError?.message || 'contact_not_found'
+                    }
+                  });
+                  
                   responseContent = 'Contact not found or you don\'t have permission to delete it.';
                   shouldSendSMS = true;
                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9896,6 +13421,17 @@ if (is_host === true) {
                   });
                 }
                 
+                await logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'edit_contact',
+                  workflowStep: 'delete_contact_ownership_verified',
+                  executionStatus: 'success',
+                  metadata: {
+                    contact_id: contactId
+                  }
+                });
+                
                 // Delete from crew_members (cascade)
                 await supabase
                   .from('crew_members')
@@ -9916,6 +13452,19 @@ if (is_host === true) {
                   .eq('user_id', userId);
                 
                 if (deleteError) throw deleteError;
+                
+                await logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'edit_contact',
+                  workflowStep: 'delete_contact_completed',
+                  executionStatus: 'success',
+                  metadata: {
+                    contact_id: contactId,
+                    contact_name: contactName,
+                    contact_phone: contactPhone
+                  }
+                });
                 
                 responseContent = `Deleted ${contactName} — (${formatPhoneNumberForDisplay(contactPhone)}) from all crews and events.`;
                 shouldSendSMS = true;
@@ -9943,6 +13492,16 @@ if (is_host === true) {
                 
               } catch (error) {
                 console.error('Error in EDIT_CONTACT_DELETE_CONFIRMED:', error);
+                await logWorkflowError({
+                  supabase,
+                  userId,
+                  workflowName: 'edit_contact',
+                  workflowStep: 'error',
+                  errorDetails: {
+                    error_message: error instanceof Error ? error.message : String(error),
+                    action: 'EDIT_CONTACT_DELETE_CONFIRMED'
+                  }
+                });
                 responseContent = 'Failed to delete contact. Please try again.';
                 shouldSendSMS = true;
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -9964,7 +13523,7 @@ if (is_host === true) {
                    const memberList = crewData?.member_list || [];
                  
                  if (!crewId || !crewName || memberIndices.length === 0) {
-                   responseContent = 'I didn\'t understand that. Reply with numbers, \'Next\' or \'N\', \'Prev\' or \'P\', or \'Done\' or \'D\'.';
+                   responseContent = 'I didn\'t understand that. Reply with numbers, \'Next\', \'Prev\', or \'Done\'.';
                    shouldSendSMS = true;
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
                    return new Response(JSON.stringify({
@@ -9998,7 +13557,7 @@ if (is_host === true) {
                  const membersToRemove = validIndices.map(idx => memberList[idx]).filter(m => m);
                  
                  if (membersToRemove.length === 0) {
-                   responseContent = 'I didn\'t understand that. Reply with numbers, \'Next\' or \'N\', \'Prev\' or \'P\', or \'Done\' or \'D\'.';
+                   responseContent = 'I didn\'t understand that. Reply with numbers, \'Next\', \'Prev\', or \'Done\'.';
                    shouldSendSMS = true;
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
                    return new Response(JSON.stringify({
@@ -10108,13 +13667,13 @@ if (is_host === true) {
                   responseContent = 'I didn\'t understand that. Reply with numbers';
                   // Only show pagination actions if available
                   if (hasMore && hasPrevious) {
-                    responseContent += ', \'Next\' or \'N\', \'Prev\' or \'P\'';
+                    responseContent += ', \'Next\', \'Prev\'';
                   } else if (hasMore) {
-                    responseContent += ', \'Next\' or \'N\'';
+                    responseContent += ', \'Next\'';
                   } else if (hasPrevious) {
-                    responseContent += ', \'Prev\' or \'P\'';
+                    responseContent += ', \'Prev\'';
                   }
-                  responseContent += ', or \'Done\' or \'D\'.';
+                  responseContent += ', or \'Done\'.';
                   shouldSendSMS = true;
                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
                   return new Response(JSON.stringify({
@@ -10497,12 +14056,12 @@ if (is_host === true) {
              } else if (action === 'EVENT_SELECTION') {
                console.log('EVENT_SELECTION detected via pattern matching, bypassing AI');
                
+               let cameFromCheckRsvps = false;
                try {
                  const eventIndex = extractedData.event_index;
                  
                 // Get the event list from the most recent action that showed events
                 let eventList = null;
-                let cameFromCheckRsvps = false;
                 if (conversationState?.extracted_data && Array.isArray(conversationState.extracted_data)) {
                   for (let i = conversationState.extracted_data.length - 1; i >= 0; i--) {
                     const item = conversationState.extracted_data[i];
@@ -10519,6 +14078,16 @@ if (is_host === true) {
                  if (!eventList || eventIndex < 0 || eventIndex >= eventList.length) {
                    // Provide contextual error message based on waiting_for state and current_state
                    if (conversationState?.waiting_for === 'event_selection' && conversationState?.current_state === 'check_rsvps_step_1') {
+                     if (cameFromCheckRsvps) {
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'check_rsvps',
+                         workflowStep: 'invalid_event_selection',
+                         executionStatus: 'failure',
+                         metadata: { event_index: eventIndex }
+                       });
+                     }
                      responseContent = 'I didn\'t understand that. Reply with an event number or \'exit\' to do something else.';
                    } else if (conversationState?.waiting_for === 'event_selection') {
                      responseContent = 'I didn\'t understand that. Reply with an event number or \'exit\' to do something else.';
@@ -10531,6 +14100,15 @@ if (is_host === true) {
                    
                   // If we are selecting for CHECK_RSVPS, return RSVP details immediately
                   if (cameFromCheckRsvps) {
+                    logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'check_rsvps',
+                      workflowStep: 'event_selected',
+                      executionStatus: 'success',
+                      metadata: { event_id: selectedEvent.id, event_title: selectedEvent.title, event_index: eventIndex }
+                    });
+
                     await supabase
                       .from('conversation_state')
                       .update({
@@ -10550,6 +14128,15 @@ if (is_host === true) {
 
                     responseContent = await checkRSVPsForEvent(supabase, selectedEvent.id, userId, phone_number, send_sms);
                     shouldSendSMS = true;
+
+                    logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'check_rsvps',
+                      workflowStep: 'rsvp_details_displayed',
+                      executionStatus: 'success',
+                      metadata: { event_id: selectedEvent.id, event_title: selectedEvent.title }
+                    });
                   } else {
                     // Default behavior
                     await supabase
@@ -10585,6 +14172,15 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in EVENT_SELECTION pattern matching:', error);
+                 if (cameFromCheckRsvps) {
+                   logWorkflowError({
+                     supabase,
+                     userId,
+                     workflowName: 'check_rsvps',
+                     workflowStep: 'event_selected',
+                     metadata: { error: error?.message || String(error) }
+                   });
+                 }
                  responseContent = 'Failed to select event. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -10651,20 +14247,41 @@ if (is_host === true) {
                  
                  // Find the most recent PARTIAL_EVENT_DETAILS entry
                  let partialEventData = null;
+                 let crewId = null;
                  if (conversationStateData?.extracted_data && Array.isArray(conversationStateData.extracted_data)) {
                    for (let i = conversationStateData.extracted_data.length - 1; i >= 0; i--) {
                      const item = conversationStateData.extracted_data[i];
                      if (item.action === 'PARTIAL_EVENT_DETAILS') {
                        partialEventData = item;
+                       crewId = item.crew_id;
                        break;
                      }
                    }
                  }
                  
                  if (!partialEventData) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'event_name_validation_failed',
+                     executionStatus: 'failure',
+                     crewId: crewId,
+                     metadata: { reason: 'no_partial_event_data_found' }
+                   });
                    responseContent = 'No event details found. Please start over by saying "create event".';
                    shouldSendSMS = true;
                  } else {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'event_name_received',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     metadata: { event_name: eventName }
+                   });
+                   
                    // Update the partial event data with the new field
                    const updatedEventData = {
                      ...partialEventData,
@@ -10684,6 +14301,16 @@ if (is_host === true) {
                      })
                      .eq('user_id', userId);
                    
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'transition_to_date_input',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     metadata: { event_name: eventName }
+                   });
+                   
                    responseContent = "Date?";
                    shouldSendSMS = true;
                  }
@@ -10700,6 +14327,13 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in PARTIAL_EVENT_NAME pattern matching:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'send_invitations',
+                   workflowStep: 'event_name_error',
+                   errorDetails: { error: error.message || String(error) }
+                 });
                  responseContent = 'Failed to process event name. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -10728,20 +14362,41 @@ if (is_host === true) {
                  
                  // Find the most recent PARTIAL_EVENT_DETAILS entry
                  let partialEventData = null;
+                 let crewId = null;
                  if (conversationStateData?.extracted_data && Array.isArray(conversationStateData.extracted_data)) {
                    for (let i = conversationStateData.extracted_data.length - 1; i >= 0; i--) {
                      const item = conversationStateData.extracted_data[i];
                      if (item.action === 'PARTIAL_EVENT_DETAILS') {
                        partialEventData = item;
+                       crewId = item.crew_id;
                        break;
                      }
                    }
                  }
                  
                  if (!partialEventData) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'event_date_validation_failed',
+                     executionStatus: 'failure',
+                     crewId: crewId,
+                     metadata: { reason: 'no_partial_event_data_found' }
+                   });
                    responseContent = 'No event details found. Please start over by saying "create event".';
                    shouldSendSMS = true;
                  } else {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'event_date_received',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     metadata: { date: date }
+                   });
+                   
                    // Update the partial event data with the new field
                    const updatedEventData = {
                      ...partialEventData,
@@ -10761,6 +14416,16 @@ if (is_host === true) {
                      })
                      .eq('user_id', userId);
                    
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'transition_to_location_input',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     metadata: { date: date }
+                   });
+                   
                    responseContent = "Location?";
                    shouldSendSMS = true;
                  }
@@ -10777,6 +14442,13 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in PARTIAL_EVENT_DATE pattern matching:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'send_invitations',
+                   workflowStep: 'event_date_error',
+                   errorDetails: { error: error.message || String(error) }
+                 });
                  responseContent = 'Failed to process event date. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -10806,20 +14478,41 @@ if (is_host === true) {
                  
                  // Find the most recent PARTIAL_EVENT_DETAILS entry
                  let partialEventData = null;
+                 let crewId = null;
                  if (conversationStateData?.extracted_data && Array.isArray(conversationStateData.extracted_data)) {
                    for (let i = conversationStateData.extracted_data.length - 1; i >= 0; i--) {
                      const item = conversationStateData.extracted_data[i];
                      if (item.action === 'PARTIAL_EVENT_DETAILS') {
                        partialEventData = item;
+                       crewId = item.crew_id;
                        break;
                      }
                    }
                  }
                  
                  if (!partialEventData) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'event_time_validation_failed',
+                     executionStatus: 'failure',
+                     crewId: crewId,
+                     metadata: { reason: 'no_partial_event_data_found' }
+                   });
                    responseContent = 'No event details found. Please start over by saying "create event".';
                    shouldSendSMS = true;
                  } else {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'event_time_received',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     metadata: { start_time: startTime, end_time: endTime }
+                   });
+                   
                    // Update the partial event data with the new field
                    const updatedEventData = {
                      ...partialEventData,
@@ -10840,6 +14533,16 @@ if (is_host === true) {
                      })
                      .eq('user_id', userId);
                    
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'transition_to_notes_input',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     metadata: { start_time: startTime, end_time: endTime }
+                   });
+                   
                    responseContent = "Any notes? Type 'n' to skip.";
                    shouldSendSMS = true;
                  }
@@ -10856,6 +14559,13 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in PARTIAL_EVENT_TIME pattern matching:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'send_invitations',
+                   workflowStep: 'event_time_error',
+                   errorDetails: { error: error.message || String(error) }
+                 });
                  responseContent = 'Failed to process event time. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -10884,20 +14594,41 @@ if (is_host === true) {
                  
                  // Find the most recent PARTIAL_EVENT_DETAILS entry
                  let partialEventData = null;
+                 let crewId = null;
                  if (conversationStateData?.extracted_data && Array.isArray(conversationStateData.extracted_data)) {
                    for (let i = conversationStateData.extracted_data.length - 1; i >= 0; i--) {
                      const item = conversationStateData.extracted_data[i];
                      if (item.action === 'PARTIAL_EVENT_DETAILS') {
                        partialEventData = item;
+                       crewId = item.crew_id;
                        break;
                      }
                    }
                  }
                  
                  if (!partialEventData) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'event_location_validation_failed',
+                     executionStatus: 'failure',
+                     crewId: crewId,
+                     metadata: { reason: 'no_partial_event_data_found' }
+                   });
                    responseContent = 'No event details found. Please start over by saying "create event".';
                    shouldSendSMS = true;
                  } else {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'event_location_received',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     metadata: { location: location }
+                   });
+                   
                    // Update the partial event data with the new field
                    const updatedEventData = {
                      ...partialEventData,
@@ -10917,6 +14648,16 @@ if (is_host === true) {
                      })
                      .eq('user_id', userId);
                    
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'transition_to_time_input',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     metadata: { location: location }
+                   });
+                   
                    responseContent = "What time? (e.g. 5pm or 5-7pm, end time optional)";
                    shouldSendSMS = true;
                  }
@@ -10933,6 +14674,13 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in PARTIAL_EVENT_LOCATION pattern matching:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'send_invitations',
+                   workflowStep: 'event_location_error',
+                   errorDetails: { error: error.message || String(error) }
+                 });
                  responseContent = 'Failed to process event location. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -10948,6 +14696,28 @@ if (is_host === true) {
                }
              } else if (action === 'INVALID_EVENT_NAME_INPUT') {
               console.log('INVALID_EVENT_NAME_INPUT detected via pattern matching, bypassing AI');
+              
+              // Get crew_id from conversation state if available
+              let crewId = null;
+              if (conversationState?.extracted_data && Array.isArray(conversationState.extracted_data)) {
+                for (let i = conversationState.extracted_data.length - 1; i >= 0; i--) {
+                  const item = conversationState.extracted_data[i];
+                  if (item.crew_id) {
+                    crewId = item.crew_id;
+                    break;
+                  }
+                }
+              }
+              
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'send_invitations',
+                workflowStep: 'invalid_event_name_input',
+                executionStatus: 'failure',
+                crewId: crewId
+              });
+              
               responseContent = "I didn't understand that. What should we call this event? Type 'exit' to cancel.";
               shouldSendSMS = true;
               await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -10962,6 +14732,28 @@ if (is_host === true) {
               });
             } else if (action === 'INVALID_DATE_INPUT') {
               console.log('INVALID_DATE_INPUT detected via pattern matching, bypassing AI');
+              
+              // Get crew_id from conversation state if available
+              let crewId = null;
+              if (conversationState?.extracted_data && Array.isArray(conversationState.extracted_data)) {
+                for (let i = conversationState.extracted_data.length - 1; i >= 0; i--) {
+                  const item = conversationState.extracted_data[i];
+                  if (item.crew_id) {
+                    crewId = item.crew_id;
+                    break;
+                  }
+                }
+              }
+              
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'send_invitations',
+                workflowStep: 'invalid_date_input',
+                executionStatus: 'failure',
+                crewId: crewId
+              });
+              
               responseContent = "I didn't understand that. What's the date? (e.g. Oct 20, 10/20, tomorrow). Type 'exit' to cancel.";
               shouldSendSMS = true;
               await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -10976,6 +14768,28 @@ if (is_host === true) {
               });
             } else if (action === 'INVALID_TIME_INPUT') {
               console.log('INVALID_TIME_INPUT detected via pattern matching, bypassing AI');
+              
+              // Get crew_id from conversation state if available
+              let crewId = null;
+              if (conversationState?.extracted_data && Array.isArray(conversationState.extracted_data)) {
+                for (let i = conversationState.extracted_data.length - 1; i >= 0; i--) {
+                  const item = conversationState.extracted_data[i];
+                  if (item.crew_id) {
+                    crewId = item.crew_id;
+                    break;
+                  }
+                }
+              }
+              
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'send_invitations',
+                workflowStep: 'invalid_time_input',
+                executionStatus: 'failure',
+                crewId: crewId
+              });
+              
               responseContent = "I didn't understand that. What time? (e.g. 5pm or 5-7pm). Type 'exit' to cancel.";
               shouldSendSMS = true;
               await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -10990,6 +14804,28 @@ if (is_host === true) {
               });
             } else if (action === 'INVALID_LOCATION_INPUT') {
               console.log('INVALID_LOCATION_INPUT detected via pattern matching, bypassing AI');
+              
+              // Get crew_id from conversation state if available
+              let crewId = null;
+              if (conversationState?.extracted_data && Array.isArray(conversationState.extracted_data)) {
+                for (let i = conversationState.extracted_data.length - 1; i >= 0; i--) {
+                  const item = conversationState.extracted_data[i];
+                  if (item.crew_id) {
+                    crewId = item.crew_id;
+                    break;
+                  }
+                }
+              }
+              
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'send_invitations',
+                workflowStep: 'invalid_location_input',
+                executionStatus: 'failure',
+                crewId: crewId
+              });
+              
               responseContent = "I didn't understand that. Where is this event? Type 'exit' to cancel.";
               shouldSendSMS = true;
               await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -11004,6 +14840,28 @@ if (is_host === true) {
               });
             } else if (action === 'INVALID_NOTES_INPUT') {
               console.log('INVALID_NOTES_INPUT detected via pattern matching, bypassing AI');
+              
+              // Get crew_id from conversation state if available
+              let crewId = null;
+              if (conversationState?.extracted_data && Array.isArray(conversationState.extracted_data)) {
+                for (let i = conversationState.extracted_data.length - 1; i >= 0; i--) {
+                  const item = conversationState.extracted_data[i];
+                  if (item.crew_id) {
+                    crewId = item.crew_id;
+                    break;
+                  }
+                }
+              }
+              
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'send_invitations',
+                workflowStep: 'invalid_notes_input',
+                executionStatus: 'failure',
+                crewId: crewId
+              });
+              
               responseContent = "I didn't understand that. Add a note or type 'n' to skip. Type 'exit' to cancel.";
               shouldSendSMS = true;
               await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -11031,20 +14889,41 @@ if (is_host === true) {
                 
                 // Find the most recent PARTIAL_EVENT_DETAILS entry
                 let partialEventData = null;
+                let crewId = null;
                 if (conversationStateData?.extracted_data && Array.isArray(conversationStateData.extracted_data)) {
                   for (let i = conversationStateData.extracted_data.length - 1; i >= 0; i--) {
                     const item = conversationStateData.extracted_data[i];
                     if (item.action === 'PARTIAL_EVENT_DETAILS') {
                       partialEventData = item;
+                      crewId = item.crew_id;
                       break;
                     }
                   }
                 }
                 
                 if (!partialEventData) {
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'send_invitations',
+                    workflowStep: 'event_notes_validation_failed',
+                    executionStatus: 'failure',
+                    crewId: crewId,
+                    metadata: { reason: 'no_partial_event_data_found' }
+                  });
                   responseContent = 'No event details found. Please start over by saying "create event".';
                   shouldSendSMS = true;
                 } else {
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'send_invitations',
+                    workflowStep: 'event_notes_received',
+                    executionStatus: 'success',
+                    crewId: crewId,
+                    metadata: { notes: notes || 'skipped' }
+                  });
+                  
                   // Update the partial event data with notes
                   const updatedEventData = {
                     ...partialEventData,
@@ -11094,6 +14973,30 @@ if (is_host === true) {
                       ]
                     })
                     .eq('user_id', userId);
+                  
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'send_invitations',
+                    workflowStep: 'confirmation_prompt_shown',
+                    executionStatus: 'success',
+                    crewId: crewId,
+                    metadata: {
+                      event_name: updatedEventData.event_name,
+                      date: finalDate,
+                      location: updatedEventData.location,
+                      start_time: updatedEventData.start_time
+                    }
+                  });
+                  
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'send_invitations',
+                    workflowStep: 'transition_to_confirmation',
+                    executionStatus: 'success',
+                    crewId: crewId
+                  });
                 }
                 
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -11108,6 +15011,13 @@ if (is_host === true) {
                 });
               } catch (error) {
                 console.error('Error in PARTIAL_EVENT_NOTES pattern matching:', error);
+                logWorkflowError({
+                  supabase,
+                  userId,
+                  workflowName: 'send_invitations',
+                  workflowStep: 'event_notes_error',
+                  errorDetails: { error: error.message || String(error) }
+                });
                 responseContent = 'Failed to process event notes. Please try again.';
                 shouldSendSMS = true;
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -11160,9 +15070,36 @@ if (is_host === true) {
                  }
                  
                  if (!crewId) {
+                   logWorkflowError({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'confirmation_no_event_details',
+                     errorDetails: { reason: 'no_event_details_found' }
+                   });
                    responseContent = 'No event details found. Please start over by saying "create event".';
                    shouldSendSMS = true;
                  } else {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'confirmation_received',
+                     executionStatus: 'success',
+                     crewId: crewId,
+                     metadata: { event_name: eventName }
+                   });
+                   
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'event_creation_started',
+                     executionStatus: 'pending',
+                     crewId: crewId,
+                     metadata: { event_name: eventName }
+                   });
+                   
                    // Convert date format for database (YYYY-MM-DD)
                    const dbEventDate = eventDate ? convertDayNameToDate(eventDate) : eventDate;
                    
@@ -11219,10 +15156,38 @@ if (is_host === true) {
                      
                      if (eventError) {
                        console.error('Error creating event:', eventError);
+                       logWorkflowError({
+                         supabase,
+                         userId,
+                         workflowName: 'send_invitations',
+                         workflowStep: 'event_creation_failed',
+                         crewId: crewId,
+                         errorDetails: { error: eventError }
+                       });
                        responseContent = 'Failed to create event. Please try again.';
                        shouldSendSMS = true;
                      } else {
                        console.log('Event created successfully:', eventData.id);
+                       
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'send_invitations',
+                         workflowStep: 'event_created',
+                         executionStatus: 'success',
+                         crewId: crewId,
+                         metadata: { event_id: eventData.id, event_name: eventName }
+                       });
+                       
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'send_invitations',
+                         workflowStep: 'invitations_sending_started',
+                         executionStatus: 'pending',
+                         crewId: crewId,
+                         metadata: { event_id: eventData.id }
+                       });
                        
                        // Trigger send invitations for the newly created event
                        try {
@@ -11242,11 +15207,54 @@ if (is_host === true) {
                          if (sendInvitationsResponse.ok) {
                            const invitationsResult = await sendInvitationsResponse.json();
                            console.log('Invitations sent successfully:', invitationsResult);
+                           
+                           // Get intended recipient count (crew members) for completion message
+                           const { data: crewMembers } = await supabase
+                             .from('crew_members')
+                             .select('id')
+                             .eq('crew_id', crewId);
+                           const intendedCount = crewMembers ? crewMembers.length : 0;
+                           
+                           logWorkflowProgress({
+                             supabase,
+                             userId,
+                             workflowName: 'send_invitations',
+                             workflowStep: 'invitations_sent',
+                             executionStatus: 'success',
+                             crewId: crewId,
+                             metadata: { event_id: eventData.id, invitation_count: intendedCount }
+                           });
+                           
+                           logWorkflowProgress({
+                             supabase,
+                             userId,
+                             workflowName: 'send_invitations',
+                             workflowStep: 'invitation_count',
+                             executionStatus: 'success',
+                             crewId: crewId,
+                             metadata: { event_id: eventData.id, count: intendedCount }
+                           });
                          } else {
                            console.error('Failed to send invitations:', await sendInvitationsResponse.text());
+                           logWorkflowError({
+                             supabase,
+                             userId,
+                             workflowName: 'send_invitations',
+                             workflowStep: 'invitations_send_failed',
+                             crewId: crewId,
+                             errorDetails: { event_id: eventData.id, response_status: sendInvitationsResponse.status }
+                           });
                          }
                        } catch (invitationError) {
                          console.error('Error sending invitations:', invitationError);
+                         logWorkflowError({
+                           supabase,
+                           userId,
+                           workflowName: 'send_invitations',
+                           workflowStep: 'invitations_send_error',
+                           crewId: crewId,
+                           errorDetails: { error: invitationError.message || String(invitationError) }
+                         });
                          // Don't fail the event creation if invitations fail
                        }
                        
@@ -11273,22 +15281,36 @@ if (is_host === true) {
                          })
                          .eq('user_id', userId);
                        
-                      // Fetch event with shorten_event_url (with retry logic)
-                      const { shorten_event_url, event: eventWithUrl } = await fetchEventWithShortUrl(supabase, eventData.id);
-                      const eventLink = formatEventLink(eventData.id, shorten_event_url);
-                       
                       // Build final confirmation message
                       const displayDate = eventDate ? formatDateForDisplay(eventDate) : '';
                       const timePart = startTime ? `${startTime}${endTime && endTime !== startTime ? `-${endTime}` : ''}` : '';
                       if (intendedCount > 0) {
-                        responseContent = `${intendedCount} invites sent for ${eventName}${displayDate ? ` on ${displayDate}` : ''}${timePart ? ` at ${timePart}` : ''}. Check RSVPs: ${eventLink}`;
+                        responseContent = `${intendedCount} invites sent for ${eventName}${displayDate ? ` on ${displayDate}` : ''}${timePart ? ` at ${timePart}` : ''}. Type "RSVPs" to check responses.`;
                       } else {
-                        responseContent = `No invites were sent for ${eventName}${displayDate ? ` on ${displayDate}` : ''}${timePart ? ` at ${timePart}` : ''}. Check RSVPs: ${eventLink}`;
+                        responseContent = `No invites were sent for ${eventName}${displayDate ? ` on ${displayDate}` : ''}${timePart ? ` at ${timePart}` : ''}. Type "RSVPs" to check responses.`;
                       }
                        shouldSendSMS = true;
+                       
+                       logWorkflowComplete({
+                         supabase,
+                         userId,
+                         workflowName: 'send_invitations',
+                         workflowStep: 'completed',
+                         executionStatus: 'success',
+                         crewId: crewId,
+                         outputData: { event_id: eventData.id, event_name: eventName, invitation_count: intendedCount }
+                       });
                      }
                    } catch (error) {
                      console.error('Error in event creation:', error);
+                     logWorkflowError({
+                       supabase,
+                       userId,
+                       workflowName: 'send_invitations',
+                       workflowStep: 'event_creation_error',
+                       crewId: crewId,
+                       errorDetails: { error: error.message || String(error) }
+                     });
                      responseContent = 'Failed to create event. Please try again.';
                      shouldSendSMS = true;
                    }
@@ -11306,6 +15328,13 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in EVENT_CONFIRMATION_YES pattern matching:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'send_invitations',
+                   workflowStep: 'confirmation_error',
+                   errorDetails: { error: error.message || String(error) }
+                 });
                  responseContent = 'Failed to confirm event. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -11323,6 +15352,27 @@ if (is_host === true) {
                console.log('EVENT_CONFIRMATION_NO detected via pattern matching, bypassing AI');
                
                try {
+                 // Get crew_id from conversation state if available
+                 let crewId = null;
+                 if (conversationState?.extracted_data && Array.isArray(conversationState.extracted_data)) {
+                   for (let i = conversationState.extracted_data.length - 1; i >= 0; i--) {
+                     const item = conversationState.extracted_data[i];
+                     if (item.crew_id) {
+                       crewId = item.crew_id;
+                       break;
+                     }
+                   }
+                 }
+                 
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 'send_invitations',
+                   workflowStep: 'confirmation_cancelled',
+                   executionStatus: 'success',
+                   crewId: crewId
+                 });
+                 
                  responseContent = 'Event creation cancelled. You can start over anytime by saying "create event".';
                  shouldSendSMS = true;
                  
@@ -11336,6 +15386,24 @@ if (is_host === true) {
                    })
                    .eq('user_id', userId);
                  
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 'send_invitations',
+                   workflowStep: 'workflow_abandoned',
+                   executionStatus: 'failure',
+                   crewId: crewId
+                 });
+                 
+                 logWorkflowComplete({
+                   supabase,
+                   userId,
+                   workflowName: 'send_invitations',
+                   workflowStep: 'cancelled',
+                   executionStatus: 'failure',
+                   crewId: crewId
+                 });
+                 
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
                  
                  return new Response(JSON.stringify({
@@ -11348,6 +15416,13 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in EVENT_CONFIRMATION_NO pattern matching:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'send_invitations',
+                   workflowStep: 'cancellation_error',
+                   errorDetails: { error: error.message || String(error) }
+                 });
                  responseContent = 'Failed to cancel event. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -11363,6 +15438,15 @@ if (is_host === true) {
                }
              } else if (action === 'INVITE_MORE_PEOPLE') {
                console.log('INVITE_MORE_PEOPLE detected via pattern matching, bypassing AI');
+               
+               // Log workflow start
+               logWorkflowStart({
+                 supabase,
+                 userId,
+                 workflowName: 'invite_more_people',
+                 workflowStep: 'initiated',
+                 inputData: { event_name: extractedData.event_name }
+               });
                
                try {
                  const eventName = extractedData.event_name;
@@ -11384,20 +15468,81 @@ if (is_host === true) {
                    .order('event_date', { ascending: true });
                  
                  if (!userEvents || userEvents.length === 0) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'invite_more_people',
+                     workflowStep: 'no_events_found',
+                     executionStatus: 'success'
+                   });
                    responseContent = 'No events found. Type \'Create Event\' to create your first event.';
                    shouldSendSMS = true;
                  } else {
                    // If event name was provided, try to find a matching event
                    if (eventName) {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'invite_more_people',
+                       workflowStep: 'event_name_specified',
+                       executionStatus: 'success',
+                       metadata: { event_name: eventName }
+                     });
+                     
                      const matchingEvent = userEvents.find(event => 
                        event.title.toLowerCase().includes(eventName.toLowerCase()) ||
                        eventName.toLowerCase().includes(event.title.toLowerCase())
                      );
                      
                      if (matchingEvent) {
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'invite_more_people',
+                         workflowStep: 'event_found_by_name',
+                         executionStatus: 'success',
+                         crewId: matchingEvent.crews?.id,
+                         metadata: { event_id: matchingEvent.id, event_title: matchingEvent.title }
+                       });
+                       
                        // Auto-select the matching event and show uninvited crew members
                        responseContent = await showUninvitedCrewMembers(supabase, matchingEvent, userId, phone_number, send_sms);
                        shouldSendSMS = true;
+                       
+                       // Parse response to determine uninvited member status
+                       if (responseContent.includes("haven't been invited yet")) {
+                         const uninvitedMatch = responseContent.match(/\((\d+)\)/);
+                         const uninvitedCount = uninvitedMatch ? parseInt(uninvitedMatch[1]) : 0;
+                         logWorkflowProgress({
+                           supabase,
+                           userId,
+                           workflowName: 'invite_more_people',
+                           workflowStep: 'uninvited_members_shown',
+                           executionStatus: 'success',
+                           crewId: matchingEvent.crews?.id,
+                           metadata: { uninvited_count: uninvitedCount, event_id: matchingEvent.id }
+                         });
+                       } else if (responseContent.includes("already invited")) {
+                         logWorkflowProgress({
+                           supabase,
+                           userId,
+                           workflowName: 'invite_more_people',
+                           workflowStep: 'all_members_already_invited',
+                           executionStatus: 'success',
+                           crewId: matchingEvent.crews?.id,
+                           metadata: { event_id: matchingEvent.id }
+                         });
+                       } else if (responseContent.includes("No members found")) {
+                         logWorkflowProgress({
+                           supabase,
+                           userId,
+                           workflowName: 'invite_more_people',
+                           workflowStep: 'no_members_found',
+                           executionStatus: 'success',
+                           crewId: matchingEvent.crews?.id,
+                           metadata: { event_id: matchingEvent.id }
+                         });
+                       }
                        
                        // Set appropriate waiting state based on the response
                        let waitingFor = null;
@@ -11439,6 +15584,15 @@ if (is_host === true) {
                            .eq('user_id', userId);
                        }
                      } else {
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'invite_more_people',
+                         workflowStep: 'event_not_found_by_name',
+                         executionStatus: 'success',
+                         metadata: { requested_event_name: eventName }
+                       });
+                       
                        // Event name not found, show available events
                        responseContent = `I couldn't find an event matching "${eventName}". Here are your events:\n\n`;
                        let eventsList = '';
@@ -11455,6 +15609,15 @@ if (is_host === true) {
                        eventsList += '\nReply with the number of your chosen event.';
                        responseContent += eventsList;
                        shouldSendSMS = true;
+
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'invite_more_people',
+                         workflowStep: 'multiple_events_list_shown',
+                         executionStatus: 'success',
+                         metadata: { events_count: userEvents.length }
+                       });
 
                        // Update conversation state to wait for event selection
                        await supabase
@@ -11475,8 +15638,54 @@ if (is_host === true) {
                  } else if (userEvents.length === 1) {
                      // Only one event - use it automatically and show uninvited crew members
                    const event = userEvents[0];
+                   
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'invite_more_people',
+                     workflowStep: 'single_event_auto_selected',
+                     executionStatus: 'success',
+                     crewId: event.crews?.id,
+                     metadata: { event_id: event.id, event_title: event.title }
+                   });
+                   
                      responseContent = await showUninvitedCrewMembers(supabase, event, userId, phone_number, send_sms);
                      shouldSendSMS = true;
+                     
+                     // Parse response to determine uninvited member status
+                     if (responseContent.includes("haven't been invited yet")) {
+                       const uninvitedMatch = responseContent.match(/\((\d+)\)/);
+                       const uninvitedCount = uninvitedMatch ? parseInt(uninvitedMatch[1]) : 0;
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'invite_more_people',
+                         workflowStep: 'uninvited_members_shown',
+                         executionStatus: 'success',
+                         crewId: event.crews?.id,
+                         metadata: { uninvited_count: uninvitedCount, event_id: event.id }
+                       });
+                     } else if (responseContent.includes("already invited")) {
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'invite_more_people',
+                         workflowStep: 'all_members_already_invited',
+                         executionStatus: 'success',
+                         crewId: event.crews?.id,
+                         metadata: { event_id: event.id }
+                       });
+                     } else if (responseContent.includes("No members found")) {
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'invite_more_people',
+                         workflowStep: 'no_members_found',
+                         executionStatus: 'success',
+                         crewId: event.crews?.id,
+                         metadata: { event_id: event.id }
+                       });
+                     }
                      
                      // Set appropriate waiting state based on the response
                      let waitingFor = null;
@@ -11519,17 +15728,26 @@ if (is_host === true) {
                    }
                  } else {
                    // Multiple events - ask user to choose
-                    let eventsList = 'Invite more people to which event?\n';
-                    userEvents.forEach((event, index) => {
-                      eventsList += `${index + 1}. ${event.title}\n`;
-                    });
-                    eventsList += 'Reply with the event number.';
-                     
-                     responseContent = eventsList;
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'invite_more_people',
+                     workflowStep: 'multiple_events_list_shown',
+                     executionStatus: 'success',
+                     metadata: { events_count: userEvents.length }
+                   });
+                   
+                   let eventsList = 'Invite more people to which event?\n';
+                   userEvents.forEach((event, index) => {
+                     eventsList += `${index + 1}. ${event.title}\n`;
+                   });
+                   eventsList += 'Reply with the event number.';
+                   
+                   responseContent = eventsList;
                    shouldSendSMS = true;
                    
-                     // Update conversation state to wait for event selection
-                     await supabase
+                   // Update conversation state to wait for event selection
+                   await supabase
                      .from('conversation_state')
                      .update({
                        waiting_for: 'invite_more_people_event_selection',
@@ -11558,6 +15776,13 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in INVITE_MORE_PEOPLE pattern matching:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'invite_more_people',
+                   workflowStep: 'error',
+                   errorDetails: { error: error.message || String(error) }
+                 });
                  responseContent = 'Failed to process invite more people. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -11573,6 +15798,15 @@ if (is_host === true) {
                }
              } else if (action === 'INVITE_MORE_PEOPLE_STEP_2') {
                console.log('INVITE_MORE_PEOPLE_STEP_2 detected via pattern matching, bypassing AI');
+               
+               // Log workflow start
+               logWorkflowStart({
+                 supabase,
+                 userId,
+                 workflowName: 'invite_more_people',
+                 workflowStep: 'event_selection_started',
+                 inputData: { event_index: extractedData.event_index }
+               });
                
                try {
                  if (extractedData.event_index !== undefined) {
@@ -11605,9 +15839,54 @@ if (is_host === true) {
                        .single();
                      
                      if (eventData) {
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'invite_more_people',
+                         workflowStep: 'event_selected',
+                         executionStatus: 'success',
+                         crewId: eventData.crews?.id,
+                         metadata: { event_id: eventData.id, event_title: eventData.title, event_index: extractedData.event_index }
+                       });
+                       
                        // Show uninvited crew members for the selected event
                        responseContent = await showUninvitedCrewMembers(supabase, eventData, userId, phone_number, send_sms);
                        shouldSendSMS = true;
+                       
+                       // Parse response to determine uninvited member status
+                       if (responseContent.includes("haven't been invited yet")) {
+                         const uninvitedMatch = responseContent.match(/\((\d+)\)/);
+                         const uninvitedCount = uninvitedMatch ? parseInt(uninvitedMatch[1]) : 0;
+                         logWorkflowProgress({
+                           supabase,
+                           userId,
+                           workflowName: 'invite_more_people',
+                           workflowStep: 'uninvited_members_shown',
+                           executionStatus: 'success',
+                           crewId: eventData.crews?.id,
+                           metadata: { uninvited_count: uninvitedCount, event_id: eventData.id }
+                         });
+                       } else if (responseContent.includes("already invited")) {
+                         logWorkflowProgress({
+                           supabase,
+                           userId,
+                           workflowName: 'invite_more_people',
+                           workflowStep: 'all_members_already_invited',
+                           executionStatus: 'success',
+                           crewId: eventData.crews?.id,
+                           metadata: { event_id: eventData.id }
+                         });
+                       } else if (responseContent.includes("No members found")) {
+                         logWorkflowProgress({
+                           supabase,
+                           userId,
+                           workflowName: 'invite_more_people',
+                           workflowStep: 'no_members_found',
+                           executionStatus: 'success',
+                           crewId: eventData.crews?.id,
+                           metadata: { event_id: eventData.id }
+                         });
+                       }
                        
                        // Set appropriate waiting state based on the response
                        let waitingFor = null;
@@ -11649,14 +15928,37 @@ if (is_host === true) {
                            .eq('user_id', userId);
                        }
                      } else {
+                      logWorkflowProgress({
+                        supabase,
+                        userId,
+                        workflowName: 'invite_more_people',
+                        workflowStep: 'invalid_event_selection',
+                        executionStatus: 'failure',
+                        metadata: { event_index: extractedData.event_index }
+                      });
                       responseContent = "I didn't understand that. Reply with an event number or 'exit' to do something else.";
                        shouldSendSMS = true;
                      }
                    } else {
+                    logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'invite_more_people',
+                      workflowStep: 'invalid_event_selection',
+                      executionStatus: 'failure',
+                      metadata: { event_index: extractedData.event_index }
+                    });
                     responseContent = "I didn't understand that. Reply with an event number or 'exit' to do something else.";
                      shouldSendSMS = true;
                    }
                  } else {
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'invite_more_people',
+                    workflowStep: 'invalid_event_selection',
+                    executionStatus: 'failure'
+                  });
                   responseContent = "I didn't understand that. Reply with an event number or 'exit' to do something else.";
                    shouldSendSMS = true;
                  }
@@ -11673,6 +15975,13 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in INVITE_MORE_PEOPLE_STEP_2 pattern matching:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'invite_more_people',
+                   workflowStep: 'error',
+                   errorDetails: { error: error.message || String(error) }
+                 });
                  responseContent = 'Failed to process event selection. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -11688,6 +15997,14 @@ if (is_host === true) {
                }
              } else if (action === 'INVITE_MORE_PEOPLE_SELECTION_ERROR') {
                console.log('INVITE_MORE_PEOPLE_SELECTION_ERROR detected via pattern matching');
+               logWorkflowProgress({
+                 supabase,
+                 userId,
+                 workflowName: 'invite_more_people',
+                 workflowStep: 'invalid_event_selection',
+                 executionStatus: 'failure',
+                 metadata: { invalid_input: message }
+               });
                responseContent = `I didn't understand that. Reply with an event number or 'exit' to do something else.`;
                shouldSendSMS = true;
                await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -11699,6 +16016,15 @@ if (is_host === true) {
                }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
              } else if (action === 'INVITE_MORE_PEOPLE_STEP_3') {
                console.log('INVITE_MORE_PEOPLE_STEP_3 detected via pattern matching, bypassing AI');
+               
+               // Log workflow start
+               logWorkflowStart({
+                 supabase,
+                 userId,
+                 workflowName: 'invite_more_people',
+                 workflowStep: 'method_selection_started',
+                 inputData: { invite_method: extractedData.invite_method }
+               });
                
                try {
                  // Get existing extracted_data to preserve it
@@ -11717,6 +16043,14 @@ if (is_host === true) {
                  }];
                  
                  if (extractedData.invite_method === 'existing_crew') {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'invite_more_people',
+                     workflowStep: 'existing_crew_method_selected',
+                     executionStatus: 'success'
+                   });
+                   
                    // Get current event's crew to exclude it from the list
                    let currentEventCrewId = null;
                    if (existingData.length > 0) {
@@ -11749,6 +16083,15 @@ if (is_host === true) {
                    const { data: userCrews } = await crewQuery;
                    
                    if (userCrews && userCrews.length > 0) {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'invite_more_people',
+                       workflowStep: 'crew_list_shown',
+                       executionStatus: 'success',
+                       metadata: { crews_count: userCrews.length }
+                     });
+                     
                      let crewList = 'Which crew do you want to invite from?\n';
                      userCrews.forEach((crew, index) => {
                        crewList += `${index + 1}. ${crew.name}\n`;
@@ -11787,10 +16130,33 @@ if (is_host === true) {
                        shouldSendSMS = true;
                      }
                    } else {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'invite_more_people',
+                       workflowStep: 'no_crews_found_for_selection',
+                       executionStatus: 'failure'
+                     });
                      responseContent = 'No crews found. Please create a crew first or choose "New contacts" option.';
                      shouldSendSMS = true;
                    }
                  } else if (extractedData.invite_method === 'new_contacts') {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'invite_more_people',
+                     workflowStep: 'new_contacts_method_selected',
+                     executionStatus: 'success'
+                   });
+                   
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'invite_more_people',
+                     workflowStep: 'new_contacts_prompt_shown',
+                     executionStatus: 'success'
+                   });
+                   
                    // Ask for new contacts
                    responseContent = 'Send me the names and phone numbers of people to invite (e.g., "John Smith 555-1234, Jane Doe 555-5678")';
                    shouldSendSMS = true;
@@ -11825,6 +16191,13 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in INVITE_MORE_PEOPLE_STEP_3 pattern matching:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'invite_more_people',
+                   workflowStep: 'error',
+                   errorDetails: { error: error.message || String(error) }
+                 });
                  responseContent = 'Failed to process method selection. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -11841,6 +16214,15 @@ if (is_host === true) {
              } else if (action === 'INVITE_MORE_PEOPLE_STEP_4A') {
                console.log('INVITE_MORE_PEOPLE_STEP_4A detected via pattern matching, bypassing AI');
                
+               // Log workflow start
+               logWorkflowStart({
+                 supabase,
+                 userId,
+                 workflowName: 'invite_more_people',
+                 workflowStep: 'crew_selection_started',
+                 inputData: { crew_index: extractedData.crew_index }
+               });
+               
                try {
                  // Get crew list from conversation state
                  const { data: conversationStateDataData } = await supabase
@@ -11856,6 +16238,16 @@ if (is_host === true) {
                  if (crewList && crewList[extractedData.crew_index]) {
                    const selectedCrew = crewList[extractedData.crew_index];
                    
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'invite_more_people',
+                     workflowStep: 'crew_selected',
+                     executionStatus: 'success',
+                     crewId: selectedCrew.id,
+                     metadata: { crew_name: selectedCrew.name, crew_index: extractedData.crew_index }
+                   });
+                   
                    // Get crew members for the selected crew
                    const { data: crewMembers } = await supabase
                      .from('crew_members')
@@ -11868,6 +16260,16 @@ if (is_host === true) {
                      .eq('crew_id', selectedCrew.id);
                    
                    if (crewMembers && crewMembers.length > 0) {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'invite_more_people',
+                       workflowStep: 'crew_members_found',
+                       executionStatus: 'success',
+                       crewId: selectedCrew.id,
+                       metadata: { members_count: crewMembers.length }
+                     });
+                     
                      // Get existing extracted_data to preserve it
                      const existingData = Array.isArray(conversationStateDataData?.extracted_data) ? conversationStateDataData.extracted_data : [];
                      const updatedExtractedData = [...existingData, {
@@ -11889,13 +16291,39 @@ if (is_host === true) {
                        })
                        .eq('user_id', userId);
                      
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'invite_more_people',
+                       workflowStep: 'confirmation_prompt_shown',
+                       executionStatus: 'success',
+                       crewId: selectedCrew.id,
+                       metadata: { members_count: crewMembers.length }
+                     });
+                     
                      responseContent = `Found ${crewMembers.length} members in ${selectedCrew.name}. Send invitations to all members? (yes/no)`;
                      shouldSendSMS = true;
                    } else {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'invite_more_people',
+                       workflowStep: 'no_members_in_crew',
+                       executionStatus: 'failure',
+                       crewId: selectedCrew.id
+                     });
                      responseContent = 'No members found in this crew.';
                      shouldSendSMS = true;
                    }
                  } else {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'invite_more_people',
+                     workflowStep: 'invalid_crew_selection',
+                     executionStatus: 'failure',
+                     metadata: { crew_index: extractedData.crew_index }
+                   });
                    responseContent = 'Please select a crew.';
                    shouldSendSMS = true;
                  }
@@ -11912,6 +16340,13 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in INVITE_MORE_PEOPLE_STEP_4A pattern matching:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'invite_more_people',
+                   workflowStep: 'error',
+                   errorDetails: { error: error.message || String(error) }
+                 });
                  responseContent = 'Failed to process crew selection. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -12111,8 +16546,28 @@ if (is_host === true) {
             } else if (action === 'INVITE_MORE_PEOPLE_STEP_4') {
                console.log('INVITE_MORE_PEOPLE_STEP_4 detected via pattern matching, bypassing AI');
                
+               // Log workflow start
+               logWorkflowStart({
+                 supabase,
+                 userId,
+                 workflowName: 'invite_more_people',
+                 workflowStep: 'new_contacts_input_started',
+                 inputData: { contacts_count: extractedData.contacts?.length || 0 }
+               });
+               
                try {
                  if (extractedData.contacts && extractedData.contacts.length > 0) {
+                   const contactNames = extractedData.contacts.map(c => c.name).join(', ');
+                   
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'invite_more_people',
+                     workflowStep: 'contacts_received',
+                     executionStatus: 'success',
+                     metadata: { contacts_count: extractedData.contacts.length, contact_names: contactNames }
+                   });
+                   
                    // Get existing extracted_data to preserve it
                    const { data: conversationStateDataData } = await supabase
                      .from('conversation_state')
@@ -12151,9 +16606,25 @@ if (is_host === true) {
                      }
                    }
                    
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'invite_more_people',
+                     workflowStep: 'confirmation_prompt_shown',
+                     executionStatus: 'success',
+                     metadata: { contacts_count: extractedData.contacts.length, event_title: eventTitle }
+                   });
+                   
                    responseContent = `Found ${extractedData.contacts.length} contacts: ${extractedData.contacts.map(c => `${c.name} (${c.phone})`).join(', ')}. Send invitations to "${eventTitle}"? (yes/no)`;
                    shouldSendSMS = true;
                  } else {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'invite_more_people',
+                     workflowStep: 'no_valid_contacts',
+                     executionStatus: 'failure'
+                   });
                    responseContent = 'No valid contacts found. Please provide names and phone numbers in format "Name Phone".';
                    shouldSendSMS = true;
                  }
@@ -12170,6 +16641,13 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in INVITE_MORE_PEOPLE_STEP_4 pattern matching:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'invite_more_people',
+                   workflowStep: 'error',
+                   errorDetails: { error: error.message || String(error) }
+                 });
                  responseContent = 'Failed to process contacts. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -12185,6 +16663,14 @@ if (is_host === true) {
                }
              } else if (action === 'INVITE_MORE_PEOPLE_STEP_5A') {
                console.log('INVITE_MORE_PEOPLE_STEP_5A detected via pattern matching, bypassing AI');
+               
+               // Log workflow start
+               logWorkflowStart({
+                 supabase,
+                 userId,
+                 workflowName: 'invite_more_people',
+                 workflowStep: 'confirmation_received'
+               });
                
                try {
                  // Get data from conversation state
@@ -12224,6 +16710,16 @@ if (is_host === true) {
                  }
                  
                  if (eventId && crewId && crewMembers.length > 0) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'invite_more_people',
+                     workflowStep: 'invitations_sending_started',
+                     executionStatus: 'pending',
+                     crewId: crewId,
+                     metadata: { event_id: eventId, event_title: eventTitle, members_count: crewMembers.length }
+                   });
+                   
                    try {
                      // Get the event's crew to add the selected crew members to it
                      const { data: eventData } = await supabase
@@ -12258,6 +16754,28 @@ if (is_host === true) {
                              const invitationsResult = await sendInvitationsResponse.json();
                              console.log('Crew invitations sent successfully:', invitationsResult);
                              
+                             const invitationsSent = invitationsResult.invitations_sent || memberIds.length;
+                             
+                             logWorkflowProgress({
+                               supabase,
+                               userId,
+                               workflowName: 'invite_more_people',
+                               workflowStep: 'invitations_sent',
+                               executionStatus: 'success',
+                               crewId: crewId,
+                               metadata: { event_id: eventId, invitations_sent: invitationsSent }
+                             });
+                             
+                             logWorkflowComplete({
+                               supabase,
+                               userId,
+                               workflowName: 'invite_more_people',
+                               workflowStep: 'completed',
+                               executionStatus: 'success',
+                               crewId: crewId,
+                               metadata: { event_id: eventId, invitations_sent: invitationsSent }
+                             });
+                             
                              // Clear conversation state after successful completion
                              await supabase
                                .from('conversation_state')
@@ -12270,16 +16788,33 @@ if (is_host === true) {
                                })
                                .eq('user_id', userId);
                              
-                             const invitationsSent = invitationsResult.invitations_sent || memberIds.length;
-                             responseContent = `${invitationsSent} more invites sent to ${eventTitle}! Text "RSVPs" to see responses.`;
+                             responseContent = `${invitationsSent} more invites sent to ${eventTitle}! Type "RSVPs" to check responses.`;
                              shouldSendSMS = true;
                            } else {
                              console.error('Failed to send crew invitations:', await sendInvitationsResponse.text());
+                             logWorkflowProgress({
+                               supabase,
+                               userId,
+                               workflowName: 'invite_more_people',
+                               workflowStep: 'send_invitations_failed',
+                               executionStatus: 'failure',
+                               crewId: crewId,
+                               metadata: { event_id: eventId }
+                             });
                              responseContent = 'Sorry, there was an error sending invitations. Please try again.';
                              shouldSendSMS = true;
                            }
                          } catch (invitationError) {
                            console.error('Error sending crew invitations:', invitationError);
+                           logWorkflowProgress({
+                             supabase,
+                             userId,
+                             workflowName: 'invite_more_people',
+                             workflowStep: 'send_invitations_failed',
+                             executionStatus: 'failure',
+                             crewId: crewId,
+                             metadata: { event_id: eventId, error: invitationError.message || String(invitationError) }
+                           });
                            responseContent = 'Sorry, there was an error sending invitations. Please try again.';
                            shouldSendSMS = true;
                          }
@@ -12297,6 +16832,14 @@ if (is_host === true) {
                      shouldSendSMS = true;
                    }
                  } else {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'invite_more_people',
+                     workflowStep: 'missing_event_or_crew_data',
+                     executionStatus: 'failure',
+                     metadata: { has_event: !!eventId, has_crew: !!crewId, has_members: crewMembers.length > 0 }
+                   });
                    responseContent = 'Missing event or crew information. Please start over.';
                    shouldSendSMS = true;
                  }
@@ -12313,6 +16856,13 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in INVITE_MORE_PEOPLE_STEP_5A pattern matching:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'invite_more_people',
+                   workflowStep: 'error',
+                   errorDetails: { error: error.message || String(error) }
+                 });
                  responseContent = 'Failed to send crew invitations. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -12328,6 +16878,14 @@ if (is_host === true) {
                }
              } else if (action === 'INVITE_MORE_PEOPLE_STEP_5') {
                console.log('INVITE_MORE_PEOPLE_STEP_5 detected via pattern matching, bypassing AI');
+               
+               // Log workflow start
+               logWorkflowStart({
+                 supabase,
+                 userId,
+                 workflowName: 'invite_more_people',
+                 workflowStep: 'confirmation_received'
+               });
                
                try {
                  // Get data from conversation state
@@ -12363,12 +16921,30 @@ if (is_host === true) {
                  }
                  
                  if (!eventId || contacts.length === 0) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'invite_more_people',
+                     workflowStep: 'missing_event_or_contacts',
+                     executionStatus: 'failure',
+                     metadata: { has_event: !!eventId, has_contacts: contacts.length > 0 }
+                   });
                    responseContent = 'No event or contacts found. Please start over by saying "invite more people".';
                    shouldSendSMS = true;
                  } else {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'invite_more_people',
+                     workflowStep: 'contact_processing_started',
+                     executionStatus: 'pending',
+                     metadata: { contacts_count: contacts.length }
+                   });
+                   
                    try {
                      let invitationsSent = 0;
                      let newContactsCreated = 0;
+                     let existingContactsUsed = 0;
                      let contactsProcessed = 0;
                      
                      // Get the event's crew information
@@ -12388,6 +16964,14 @@ if (is_host === true) {
                      }
                      
                      if (!eventCrewId) {
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'invite_more_people',
+                         workflowStep: 'no_crew_found_for_event',
+                         executionStatus: 'failure',
+                         metadata: { event_id: eventId }
+                       });
                        responseContent = 'No crew found for this event. Please start over.';
                        shouldSendSMS = true;
                      } else {
@@ -12409,6 +16993,7 @@ if (is_host === true) {
                          let contactId;
                          if (existingContact) {
                            contactId = existingContact.id;
+                           existingContactsUsed++;
                            contactsProcessed++;
                            console.log(`Using existing contact: ${contact.name} (${contact.phone})`);
                          } else {
@@ -12457,6 +17042,40 @@ if (is_host === true) {
                          }
                        }
                        
+                       if (newContactsCreated > 0) {
+                         logWorkflowProgress({
+                           supabase,
+                           userId,
+                           workflowName: 'invite_more_people',
+                           workflowStep: 'new_contacts_created',
+                           executionStatus: 'success',
+                           metadata: { new_contacts_count: newContactsCreated }
+                         });
+                       }
+                       
+                       if (existingContactsUsed > 0) {
+                         logWorkflowProgress({
+                           supabase,
+                           userId,
+                           workflowName: 'invite_more_people',
+                           workflowStep: 'existing_contacts_used',
+                           executionStatus: 'success',
+                           metadata: { existing_contacts_count: existingContactsUsed }
+                         });
+                       }
+                       
+                       if (contactIds.length > 0) {
+                         logWorkflowProgress({
+                           supabase,
+                           userId,
+                           workflowName: 'invite_more_people',
+                           workflowStep: 'crew_members_added',
+                           executionStatus: 'success',
+                           crewId: eventCrewId,
+                           metadata: { members_added_count: contactIds.length }
+                         });
+                       }
+                       
                        // Get crew member IDs for the contacts we just processed
                        if (contactIds.length > 0) {
                          const { data: crewMembers } = await supabase
@@ -12468,6 +17087,16 @@ if (is_host === true) {
                          const memberIds = crewMembers?.map(cm => cm.id) || [];
                          
                          if (memberIds.length > 0) {
+                           logWorkflowProgress({
+                             supabase,
+                             userId,
+                             workflowName: 'invite_more_people',
+                             workflowStep: 'invitations_sending_started',
+                             executionStatus: 'pending',
+                             crewId: eventCrewId,
+                             metadata: { event_id: eventId, event_title: eventTitle }
+                           });
+                           
                            // Use send-invitations function to send invitations to specific crew members
                            try {
                              const sendInvitationsResponse = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/send-invitations`, {
@@ -12487,13 +17116,51 @@ if (is_host === true) {
                                const invitationsResult = await sendInvitationsResponse.json();
                                console.log('Invitations sent successfully:', invitationsResult);
                                invitationsSent = invitationsResult.invitations_sent || memberIds.length;
+                               
+                               logWorkflowProgress({
+                                 supabase,
+                                 userId,
+                                 workflowName: 'invite_more_people',
+                                 workflowStep: 'invitations_sent',
+                                 executionStatus: 'success',
+                                 crewId: eventCrewId,
+                                 metadata: { event_id: eventId, invitations_sent: invitationsSent }
+                               });
+                               
+                               logWorkflowComplete({
+                                 supabase,
+                                 userId,
+                                 workflowName: 'invite_more_people',
+                                 workflowStep: 'completed',
+                                 executionStatus: 'success',
+                                 crewId: eventCrewId,
+                                 metadata: { event_id: eventId, invitations_sent: invitationsSent, new_contacts_created: newContactsCreated }
+                               });
                              } else {
                                console.error('Failed to send invitations:', await sendInvitationsResponse.text());
+                               logWorkflowProgress({
+                                 supabase,
+                                 userId,
+                                 workflowName: 'invite_more_people',
+                                 workflowStep: 'send_invitations_failed',
+                                 executionStatus: 'failure',
+                                 crewId: eventCrewId,
+                                 metadata: { event_id: eventId }
+                               });
                                // If send-invitations fails, fall back to the number of contacts processed
                                invitationsSent = contactsProcessed;
                              }
                            } catch (invitationError) {
                              console.error('Error sending invitations:', invitationError);
+                             logWorkflowProgress({
+                               supabase,
+                               userId,
+                               workflowName: 'invite_more_people',
+                               workflowStep: 'send_invitations_failed',
+                               executionStatus: 'failure',
+                               crewId: eventCrewId,
+                               metadata: { event_id: eventId, error: invitationError.message || String(invitationError) }
+                             });
                            }
                          }
                        }
@@ -12514,13 +17181,20 @@ if (is_host === true) {
                        if (newContactsCreated > 0) {
                          responseMessage += ` ${newContactsCreated} new contacts added as crew members.`;
                        }
-                       responseMessage += ' Text "RSVPs" to see responses.';
+                       responseMessage += ' Type "RSVPs" to check responses.';
                        
                        responseContent = responseMessage;
                        shouldSendSMS = true;
                      }
                    } catch (error) {
                      console.error('Error in INVITE_MORE_PEOPLE:', error);
+                     logWorkflowError({
+                       supabase,
+                       userId,
+                       workflowName: 'invite_more_people',
+                       workflowStep: 'error',
+                       errorDetails: { error: error.message || String(error) }
+                     });
                      responseContent = 'Failed to send invitations. Please try again.';
                      shouldSendSMS = true;
                    }
@@ -12538,6 +17212,13 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in INVITE_MORE_PEOPLE_STEP_5 pattern matching:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'invite_more_people',
+                   workflowStep: 'error',
+                   errorDetails: { error: error.message || String(error) }
+                 });
                  responseContent = 'Failed to send invitations. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -12554,7 +17235,23 @@ if (is_host === true) {
              } else if (action === 'INVITE_MORE_PEOPLE_DECLINED') {
                console.log('INVITE_MORE_PEOPLE_DECLINED detected via pattern matching, bypassing AI');
                
+               // Log workflow start
+               logWorkflowStart({
+                 supabase,
+                 userId,
+                 workflowName: 'invite_more_people',
+                 workflowStep: 'declined'
+               });
+               
                try {
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 'invite_more_people',
+                   workflowStep: 'workflow_abandoned',
+                   executionStatus: 'failure'
+                 });
+                 
                  // Clear conversation state
                  await supabase
                    .from('conversation_state')
@@ -12566,6 +17263,14 @@ if (is_host === true) {
                      extracted_data: []
                    })
                    .eq('user_id', userId);
+                 
+                 logWorkflowComplete({
+                   supabase,
+                   userId,
+                   workflowName: 'invite_more_people',
+                   workflowStep: 'cancelled',
+                   executionStatus: 'success'
+                 });
                  
                  responseContent = 'No problem! No additional invitations sent.';
                  shouldSendSMS = true;
@@ -12582,6 +17287,13 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in INVITE_MORE_PEOPLE_DECLINED pattern matching:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'invite_more_people',
+                   workflowStep: 'error',
+                   errorDetails: { error: error.message || String(error) }
+                 });
                  responseContent = 'Failed to process decline. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -12597,6 +17309,15 @@ if (is_host === true) {
                }
              } else if (action === 'SEND_INVITATIONS_WITH_CURRENT_CREW') {
                console.log('SEND_INVITATIONS_WITH_CURRENT_CREW detected via pattern matching, bypassing AI');
+               
+               // Log workflow start
+               logWorkflowStart({
+                 supabase,
+                 userId,
+                 workflowName: 'send_invitations',
+                 workflowStep: 'initiated',
+                 inputData: { action: 'SEND_INVITATIONS_WITH_CURRENT_CREW' }
+               });
                
                try {
                  // Re-fetch conversation state to get the latest data (may have been updated by menu selection)
@@ -12636,6 +17357,13 @@ if (is_host === true) {
                  }
                  
                  if (!currentCrewId) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'no_current_crew',
+                     executionStatus: 'failure'
+                   });
                    responseContent = 'No current crew found. Please create a crew first or select a crew.';
                    shouldSendSMS = true;
                    await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -12647,6 +17375,26 @@ if (is_host === true) {
                      optimization: 'pattern_matching'
                    }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
                  }
+                 
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 'send_invitations',
+                   workflowStep: 'current_crew_found',
+                   executionStatus: 'success',
+                   crewId: currentCrewId,
+                   metadata: { crew_name: currentCrewName }
+                 });
+                 
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 'send_invitations',
+                   workflowStep: 'current_crew_auto_selected',
+                   executionStatus: 'success',
+                   crewId: currentCrewId,
+                   metadata: { crew_name: currentCrewName }
+                 });
                  
                 // Auto-select the current crew and start progressive event details collection
                 responseContent = "What's the Event name?";
@@ -12692,6 +17440,13 @@ if (is_host === true) {
                  }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
                } catch (error) {
                  console.error('Error in SEND_INVITATIONS_WITH_CURRENT_CREW pattern matching:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'send_invitations',
+                   workflowStep: 'error',
+                   errorDetails: { error: error.message || String(error) }
+                 });
                  responseContent = 'Failed to create event with current crew. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -12706,6 +17461,15 @@ if (is_host === true) {
              } else if (action === 'SEND_INVITATIONS') {
                console.log('SEND_INVITATIONS detected via pattern matching, bypassing AI');
                
+               // Log workflow start
+               logWorkflowStart({
+                 supabase,
+                 userId,
+                 workflowName: 'send_invitations',
+                 workflowStep: 'initiated',
+                 inputData: { requested_crew_name: extractedData.crew_name, event_details: extractedData.event_details }
+               });
+               
                try {
                  // Check if crew_name was provided in the pattern
                  const requestedCrewName = extractedData.crew_name;
@@ -12719,19 +17483,52 @@ if (is_host === true) {
                  
                  if (crewsError) {
                    console.error('Error fetching crews:', crewsError);
+                   logWorkflowError({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'crew_list_fetch_failed',
+                     errorDetails: { error: crewsError }
+                   });
                    responseContent = 'Sorry, I couldn\'t fetch your crews. Please try again.';
                    shouldSendSMS = true;
                  } else if (userCrews && userCrews.length === 0) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'no_crews_found',
+                     executionStatus: 'success'
+                   });
                    responseContent = 'No crews found. Type "Create Crew" to create your first crew.';
                    shouldSendSMS = true;
                  } else if (requestedCrewName) {
                    // User specified a crew name - try to find it
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'crew_name_specified',
+                     executionStatus: 'success',
+                     metadata: { requested_crew_name: requestedCrewName }
+                   });
+                   
                    const requestedCrew = userCrews.find(crew => 
                      crew.name.toLowerCase() === requestedCrewName.toLowerCase()
                    );
                    
                   if (requestedCrew) {
                     // Found the requested crew - start progressive event details collection
+                    logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'send_invitations',
+                      workflowStep: 'crew_found_by_name',
+                      executionStatus: 'success',
+                      crewId: requestedCrew.id,
+                      metadata: { crew_name: requestedCrew.name }
+                    });
+                    
                     responseContent = "What's the Event name?";
                     shouldSendSMS = true;
                      
@@ -12771,6 +17568,15 @@ if (is_host === true) {
                        .eq('user_id', userId);
                    } else {
                      // Crew not found - show available crews
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'send_invitations',
+                       workflowStep: 'crew_not_found_by_name',
+                       executionStatus: 'success',
+                       metadata: { requested_crew_name: requestedCrewName, available_crews_count: userCrews.length }
+                     });
+                     
                      let crewList = `Crew "${requestedCrewName}" not found. Create event for which crew?\n`;
                      userCrews.forEach((crew, index) => {
                        crewList += `${index + 1}. ${crew.name}\n`;
@@ -12798,6 +17604,16 @@ if (is_host === true) {
                  } else if (userCrews && userCrews.length === 1) {
                    // User has exactly one crew - start progressive event details collection
                    const crew = userCrews[0];
+                   
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'single_crew_auto_selected',
+                     executionStatus: 'success',
+                     crewId: crew.id,
+                     metadata: { crew_name: crew.name }
+                   });
                    
                   // Start progressive workflow - ask for event name first
                   responseContent = "What's the Event name?";
@@ -12840,6 +17656,15 @@ if (is_host === true) {
                      .eq('user_id', userId);
                  } else {
                    // User has multiple crews - show numbered list for selection
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'multiple_crews_list_shown',
+                     executionStatus: 'success',
+                     metadata: { crews_count: userCrews.length }
+                   });
+                   
                    let crewList = 'Create event for which crew?\n';
                    userCrews.forEach((crew, index) => {
                      crewList += `${index + 1}. ${crew.name}\n`;
@@ -12879,6 +17704,13 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in SEND_INVITATIONS pattern matching:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'send_invitations',
+                   workflowStep: 'error',
+                   errorDetails: { error: error.message || String(error) }
+                 });
                  responseContent = 'Failed to create event. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -12896,10 +17728,27 @@ if (is_host === true) {
                console.log('SYNC_UP detected via pattern matching, bypassing AI');
                
                try {
+                 logWorkflowStart({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up',
+                   workflowStep: 'initiated',
+                   metadata: {}
+                 });
+
                  // Check if a specific crew name was provided
                  let targetCrew = null;
                  if (extractedData.crewName) {
                    console.log('Crew name extracted from pattern:', extractedData.crewName);
+                   
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up',
+                     workflowStep: 'crew_name_specified',
+                     executionStatus: 'success',
+                     metadata: { crew_name: extractedData.crewName }
+                   });
                    
                    // Get user's crews to find the specific crew
                    const { data: userCrews, error: crewsError } = await supabase
@@ -12916,8 +17765,25 @@ if (is_host === true) {
                      
                      if (targetCrew) {
                        console.log('Found target crew:', targetCrew);
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'sync_up',
+                         workflowStep: 'crew_found_by_name',
+                         executionStatus: 'success',
+                         crewId: targetCrew.id,
+                         metadata: { crew_id: targetCrew.id, crew_name: targetCrew.name }
+                       });
                      } else {
                        console.log('Crew not found:', extractedData.crewName);
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'sync_up',
+                         workflowStep: 'crew_not_found_by_name',
+                         executionStatus: 'success',
+                         metadata: { requested_crew_name: extractedData.crewName }
+                       });
                      }
                    }
                  }
@@ -12926,6 +17792,16 @@ if (is_host === true) {
                  if (targetCrew) {
                    responseContent = "Sync Up helps find times that work for everyone. I'll ask for event details and time options, then your crew votes on what works best.\n\nWhat's the event name?";
                    shouldSendSMS = true;
+                   
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up',
+                     workflowStep: 'progressive_workflow_started',
+                     executionStatus: 'success',
+                     crewId: targetCrew.id,
+                     metadata: { crew_id: targetCrew.id, crew_name: targetCrew.name }
+                   });
                    
                    // Update conversation state for progressive workflow
                    const { error: upsertError } = await supabase
@@ -12971,14 +17847,50 @@ if (is_host === true) {
                    
                    if (crewsError) {
                      console.error('Error fetching crews:', crewsError);
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'sync_up',
+                       workflowStep: 'crews_fetch_failed',
+                       executionStatus: 'failure',
+                       metadata: { error: crewsError?.message || String(crewsError) }
+                     });
                      responseContent = 'Failed to fetch crews. Please try again.';
                      shouldSendSMS = true;
                    } else if (!userCrews || userCrews.length === 0) {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'sync_up',
+                       workflowStep: 'no_crews_found',
+                       executionStatus: 'success',
+                       metadata: {}
+                     });
                      responseContent = 'No crews found. Type \'Create Crew\' to create your first crew.';
                      shouldSendSMS = true;
                    } else if (userCrews.length === 1) {
                      // Single crew - start progressive workflow
                      const crew = userCrews[0];
+                     
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'sync_up',
+                       workflowStep: 'single_crew_auto_selected',
+                       executionStatus: 'success',
+                       crewId: crew.id,
+                       metadata: { crew_id: crew.id, crew_name: crew.name }
+                     });
+                     
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'sync_up',
+                       workflowStep: 'progressive_workflow_started',
+                       executionStatus: 'success',
+                       crewId: crew.id,
+                       metadata: { crew_id: crew.id, crew_name: crew.name }
+                     });
                      
                      responseContent = "Sync Up helps find times that work for everyone. I'll ask for event details and time options, then your crew votes on what works best.\n\nWhat's the event name?";
                      shouldSendSMS = true;
@@ -13018,6 +17930,15 @@ if (is_host === true) {
                      }
                    } else {
                      // Multiple crews - show list
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'sync_up',
+                       workflowStep: 'multiple_crews_list_shown',
+                       executionStatus: 'success',
+                       metadata: { crews_count: userCrews.length }
+                     });
+                     
                      let crewList = 'Which crew should we coordinate with?\n';
                      userCrews.forEach((crew, index) => {
                        crewList += `${index + 1}. ${crew.name}\n`;
@@ -13060,6 +17981,13 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in SYNC_UP pattern matching:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up',
+                   workflowStep: 'initiated',
+                   metadata: { error: error?.message || String(error) }
+                 });
                  responseContent = 'Failed to start sync up. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -13092,10 +18020,38 @@ if (is_host === true) {
                  }
                  
                  if (!crewList || crewIndex < 0 || crewIndex >= crewList.length) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up',
+                     workflowStep: 'invalid_crew_selection',
+                     executionStatus: 'failure',
+                     metadata: { crew_index: crewIndex, crew_list_length: crewList?.length || 0 }
+                   });
                    responseContent = `I didn't understand that. Reply with a crew number, "Create Crew", or "exit" to do something else.`;
                    shouldSendSMS = true;
                  } else {
                    const selectedCrew = crewList[crewIndex];
+                   
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up',
+                     workflowStep: 'crew_selected',
+                     executionStatus: 'success',
+                     crewId: selectedCrew.id,
+                     metadata: { crew_id: selectedCrew.id, crew_name: selectedCrew.name, crew_index: crewIndex }
+                   });
+                   
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up',
+                     workflowStep: 'progressive_workflow_started',
+                     executionStatus: 'success',
+                     crewId: selectedCrew.id,
+                     metadata: { crew_id: selectedCrew.id, crew_name: selectedCrew.name }
+                   });
                    
                    responseContent = "Sync Up helps find times that work for everyone. I'll ask for event details and time options, then your crew votes on what works best.\n\nWhat's the event name?";
                    shouldSendSMS = true;
@@ -13147,6 +18103,13 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in CREW_SELECTION_SYNC_UP:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up',
+                   workflowStep: 'crew_selection',
+                   metadata: { error: error?.message || String(error) }
+                 });
                  responseContent = 'Failed to select crew for sync up. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -13475,28 +18438,144 @@ if (is_host === true) {
                
                const timeOptions = extractedData.time_options;
                
-               // Find event name and location from conversation state
+               // Check if this is RE_SYNC flow
+               const isReSync = conversationState?.current_state === 're_sync_time_options';
+               
+               // Find event name and location from conversation state (or RE_SYNC data)
                let eventName = null;
                let location = null;
                let crewId = null;
                let crewName = null;
+               let syncUpId = null;
+               let syncUpName = null;
                
-               if (conversationState?.extracted_data && Array.isArray(conversationState.extracted_data)) {
-                 for (let i = conversationState.extracted_data.length - 1; i >= 0; i--) {
-                   const item = conversationState.extracted_data[i];
-                   if (item.action === 'SYNC_UP_EVENT_NAME_LOCATION_PROVIDED') {
-                     eventName = item.event_name;
-                     location = item.location;
-                     crewId = item.crew_id;
-                     crewName = item.crew_name;
-                     break;
+               if (isReSync) {
+                 // For RE_SYNC, find RE_SYNC_SYNC_UP_SELECTED
+                 if (conversationState?.extracted_data && Array.isArray(conversationState.extracted_data)) {
+                   for (let i = conversationState.extracted_data.length - 1; i >= 0; i--) {
+                     const item = conversationState.extracted_data[i];
+                     if (item.action === 'RE_SYNC_SYNC_UP_SELECTED') {
+                       syncUpId = item.sync_up_id;
+                       syncUpName = item.sync_up_name;
+                       location = item.location;
+                       crewId = item.crew_id;
+                       crewName = item.crew_name;
+                       break;
+                     }
+                   }
+                 }
+                 
+                 if (syncUpId) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 're_sync',
+                     workflowStep: 'time_options_received',
+                     executionStatus: 'success',
+                     metadata: { sync_up_id: syncUpId, time_options_count: timeOptions.length }
+                   });
+                 } else {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 're_sync',
+                     workflowStep: 'sync_up_data_not_found',
+                     executionStatus: 'failure',
+                     metadata: {}
+                   });
+                 }
+               } else {
+                 // For regular SYNC_UP, find SYNC_UP_EVENT_NAME_LOCATION_PROVIDED
+                 if (conversationState?.extracted_data && Array.isArray(conversationState.extracted_data)) {
+                   for (let i = conversationState.extracted_data.length - 1; i >= 0; i--) {
+                     const item = conversationState.extracted_data[i];
+                     if (item.action === 'SYNC_UP_EVENT_NAME_LOCATION_PROVIDED') {
+                       eventName = item.event_name;
+                       location = item.location;
+                       crewId = item.crew_id;
+                       crewName = item.crew_name;
+                       break;
+                     }
                    }
                  }
                }
                
-               if (!eventName || !location || !crewId) {
+               if (!isReSync && (!eventName || !location || !crewId)) {
                  responseContent = 'No event details found. Please start over by saying "sync up".';
                  shouldSendSMS = true;
+                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                 
+                 return new Response(JSON.stringify({
+                   success: true,
+                   action: 'SYNC_UP_TIME_OPTIONS_INPUT',
+                   response: responseContent,
+                   optimization: 'pattern_matching'
+                 }), {
+                   headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                 });
+               }
+               
+               if (isReSync && !syncUpId) {
+                 responseContent = 'No sync up found. Please start over by saying "re sync".';
+                 shouldSendSMS = true;
+                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                 
+                 return new Response(JSON.stringify({
+                   success: true,
+                   action: 'SYNC_UP_TIME_OPTIONS_INPUT',
+                   response: responseContent,
+                   optimization: 'pattern_matching'
+                 }), {
+                   headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                 });
+               }
+               
+               if (isReSync) {
+                 // For RE_SYNC, build confirmation message and log
+                 let confirmMsg = `Confirm: New time options for ${syncUpName} at ${location} for ${crewName}:\n`;
+                 timeOptions.forEach((opt, idx) => {
+                   const start = new Date(opt.start_time);
+                   const end = opt.end_time ? new Date(opt.end_time) : null;
+                   const dateStr = start.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric', timeZone: 'UTC' });
+                   const startTimeStr = start.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' });
+                   const endTimeStr = end ? ` - ${end.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })}` : '';
+                   confirmMsg += `${idx + 1}. ${dateStr} ${startTimeStr}${endTimeStr}\n`;
+                 });
+                 confirmMsg += `Send to crew members? (yes/no)`;
+                 
+                 responseContent = confirmMsg;
+                 shouldSendSMS = true;
+                 
+                 await supabase
+                   .from('conversation_state')
+                   .update({
+                     waiting_for: 're_sync_confirmation',
+                     current_state: 're_sync_confirmation',
+                     extracted_data: [
+                       ...(conversationState?.extracted_data || []),
+                       {
+                         action: 'RE_SYNC_TIME_OPTIONS_PARSED',
+                         sync_up_id: syncUpId,
+                         sync_up_name: syncUpName,
+                         location: location,
+                         crew_id: crewId,
+                         crew_name: crewName,
+                         time_options_parsed: timeOptions,
+                         timestamp: new Date().toISOString()
+                       }
+                     ]
+                   })
+                   .eq('user_id', userId);
+                 
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 're_sync',
+                   workflowStep: 'confirmation_shown',
+                   executionStatus: 'success',
+                   metadata: { sync_up_id: syncUpId, sync_up_name: syncUpName, time_options_count: timeOptions.length }
+                 });
+                 
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
                  
                  return new Response(JSON.stringify({
@@ -13561,6 +18640,21 @@ if (is_host === true) {
                
              } else if (action === 'SYNC_UP_TIME_OPTIONS_ERROR') {
                console.log('SYNC_UP_TIME_OPTIONS_ERROR detected via pattern matching');
+               
+               // Check if this is RE_SYNC flow
+               const isReSync = conversationState?.current_state === 're_sync_time_options';
+               
+               if (isReSync) {
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 're_sync',
+                   workflowStep: 'time_options_error',
+                   executionStatus: 'failure',
+                   metadata: { invalid_input: message }
+                 });
+               }
+               
                responseContent = `I didn't understand that. Give me 2-3 time options (date, start time, end time optional). Type 'exit' to cancel.`;
                shouldSendSMS = true;
                await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -13620,15 +18714,44 @@ if (is_host === true) {
                  );
                  
                  if (!syncUpListData || !syncUpListData.sync_up_list) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 're_sync',
+                     workflowStep: 'sync_up_list_not_found',
+                     executionStatus: 'failure',
+                     metadata: {}
+                   });
                    responseContent = 'Sorry, I couldn\'t find the sync up list. Please try "re sync" again.';
                    shouldSendSMS = true;
                  } else {
                    const selectedSyncUp = syncUpListData.sync_up_list[selectionNumber - 1];
                    
                   if (!selectedSyncUp) {
+                    logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 're_sync',
+                      workflowStep: 'invalid_sync_up_selection',
+                      executionStatus: 'failure',
+                      metadata: { selection_number: selectionNumber }
+                    });
                     responseContent = 'I didn\'t understand that. Reply with a sync up number or \'exit\' to do something else.';
                     shouldSendSMS = true;
                    } else {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 're_sync',
+                       workflowStep: 'sync_up_selected',
+                       executionStatus: 'success',
+                       metadata: { 
+                         sync_up_id: selectedSyncUp.id, 
+                         sync_up_name: selectedSyncUp.name, 
+                         sync_up_index: selectionNumber - 1 
+                       }
+                     });
+                     
                      responseContent = `Add up to 3 new time options for ${selectedSyncUp.name} at ${selectedSyncUp.location}: Date, start time, end time optional. Example: 12/26 6-8pm, 12/28 10am-12pm`;
                      shouldSendSMS = true;
                      
@@ -13652,10 +18775,27 @@ if (is_host === true) {
                          ]
                        })
                        .eq('user_id', userId);
+                     
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 're_sync',
+                       workflowStep: 'time_options_prompt_shown',
+                       executionStatus: 'success',
+                       metadata: { sync_up_id: selectedSyncUp.id, sync_up_name: selectedSyncUp.name }
+                     });
                    }
                  }
                } catch (error) {
                  console.error('Error in RE_SYNC_SELECTION:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 're_sync',
+                   workflowStep: 'sync_up_selection',
+                   error: error instanceof Error ? error : new Error(String(error)),
+                   metadata: {}
+                 });
                  responseContent = 'Failed to select sync up. Please try again.';
                  shouldSendSMS = true;
                }
@@ -13673,6 +18813,15 @@ if (is_host === true) {
              } else if (action === 'RE_SYNC_INVALID_SELECTION') {
                console.log('RE_SYNC_INVALID_SELECTION detected via pattern matching');
                
+               logWorkflowProgress({
+                 supabase,
+                 userId,
+                 workflowName: 're_sync',
+                 workflowStep: 'invalid_selection_input',
+                 executionStatus: 'failure',
+                 metadata: { invalid_input: message }
+               });
+               
                responseContent = 'I didn\'t understand that. Reply with a sync up number or \'exit\' to do something else.';
                shouldSendSMS = true;
                
@@ -13688,6 +18837,15 @@ if (is_host === true) {
                
              } else if (action === 'RE_SYNC_INVALID_TIME_OPTIONS') {
                console.log('RE_SYNC_INVALID_TIME_OPTIONS detected via pattern matching');
+               
+               logWorkflowProgress({
+                 supabase,
+                 userId,
+                 workflowName: 're_sync',
+                 workflowStep: 'invalid_time_options_input',
+                 executionStatus: 'failure',
+                 metadata: { invalid_input: message }
+               });
                
                responseContent = 'I didn\'t understand that. Provide up to 3 date and time options or type \'exit\' to cancel.';
                shouldSendSMS = true;
@@ -13740,6 +18898,14 @@ if (is_host === true) {
                }
                
                if (!syncUpId) {
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 're_sync',
+                   workflowStep: 'sync_up_not_found',
+                   executionStatus: 'failure',
+                   metadata: {}
+                 });
                  responseContent = 'No sync up found. Please start over by saying "re sync".';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -13757,6 +18923,14 @@ if (is_host === true) {
                // parsed is already set above
                
                if (!parsed.isValid) {
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 're_sync',
+                   workflowStep: 'invalid_time_options',
+                   executionStatus: 'failure',
+                   metadata: { sync_up_id: syncUpId }
+                 });
                  responseContent = `I didn't understand that. Give me up to 3 date and time options. Type 'exit' to cancel.`;
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -13770,6 +18944,15 @@ if (is_host === true) {
                    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
                  });
                }
+               
+               logWorkflowProgress({
+                 supabase,
+                 userId,
+                 workflowName: 're_sync',
+                 workflowStep: 'time_options_received',
+                 executionStatus: 'success',
+                 metadata: { sync_up_id: syncUpId, time_options_count: parsed.timeOptions.length }
+               });
                
                // Build confirmation message
                let confirmMsg = `Confirm: New time options for ${syncUpName} at ${location} for ${crewName}:\n`;
@@ -13785,6 +18968,15 @@ if (is_host === true) {
                
                responseContent = confirmMsg;
                shouldSendSMS = true;
+               
+               logWorkflowProgress({
+                 supabase,
+                 userId,
+                 workflowName: 're_sync',
+                 workflowStep: 'confirmation_shown',
+                 executionStatus: 'success',
+                 metadata: { sync_up_id: syncUpId, sync_up_name: syncUpName, time_options_count: parsed.timeOptions.length }
+               });
                
                // Update conversation state with parsed data
                await supabase
@@ -13823,6 +19015,14 @@ if (is_host === true) {
                console.log('RE_SYNC_CONFIRMATION_YES detected via pattern matching');
                
                try {
+                 logWorkflowStart({
+                   supabase,
+                   userId,
+                   workflowName: 're_sync',
+                   workflowStep: 'confirmation_received',
+                   metadata: {}
+                 });
+                 
                  // Get sync up data from conversation state
                  let reSyncData = null;
                  if (conversationState?.extracted_data && Array.isArray(conversationState.extracted_data)) {
@@ -13836,9 +19036,26 @@ if (is_host === true) {
                  }
                  
                  if (!reSyncData) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 're_sync',
+                     workflowStep: 're_sync_data_not_found',
+                     executionStatus: 'failure',
+                     metadata: {}
+                   });
                    responseContent = 'Re-sync data not found. Please start over.';
                    shouldSendSMS = true;
                  } else {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 're_sync',
+                     workflowStep: 'old_options_deletion_started',
+                     executionStatus: 'pending',
+                     metadata: { sync_up_id: reSyncData.sync_up_id }
+                   });
+                   
                    // Delete existing sync_up_options for this sync_up_id
                    const { error: deleteOptionsError } = await supabase
                      .from('sync_up_options')
@@ -13847,9 +19064,26 @@ if (is_host === true) {
                    
                    if (deleteOptionsError) {
                      console.error('Error deleting old sync up options:', deleteOptionsError);
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 're_sync',
+                       workflowStep: 'old_options_deletion_failed',
+                       executionStatus: 'failure',
+                       metadata: { sync_up_id: reSyncData.sync_up_id, error: deleteOptionsError.message || String(deleteOptionsError) }
+                     });
                      responseContent = 'Failed to update sync up options. Please try again.';
                      shouldSendSMS = true;
                    } else {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 're_sync',
+                       workflowStep: 'new_options_creation_started',
+                       executionStatus: 'pending',
+                       metadata: { sync_up_id: reSyncData.sync_up_id, time_options_count: reSyncData.time_options_parsed.length }
+                     });
+                     
                      // Insert new sync_up_options
                      const syncUpOptions = reSyncData.time_options_parsed.map(option => ({
                        sync_up_id: reSyncData.sync_up_id,
@@ -13865,9 +19099,35 @@ if (is_host === true) {
 
                      if (optionsError) {
                        console.error('Error creating new sync up options:', optionsError);
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 're_sync',
+                         workflowStep: 'new_options_creation_failed',
+                         executionStatus: 'failure',
+                         metadata: { sync_up_id: reSyncData.sync_up_id, error: optionsError.message || String(optionsError) }
+                       });
                        responseContent = 'Failed to create new sync up options. Please try again.';
                        shouldSendSMS = true;
                      } else {
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 're_sync',
+                         workflowStep: 'new_options_created',
+                         executionStatus: 'success',
+                         metadata: { sync_up_id: reSyncData.sync_up_id, time_options_count: syncUpOptions.length }
+                       });
+                       
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 're_sync',
+                         workflowStep: 'old_responses_deletion_started',
+                         executionStatus: 'pending',
+                         metadata: { sync_up_id: reSyncData.sync_up_id }
+                       });
+                       
                        // Delete all existing sync_up_responses for this sync_up_id
                        const { error: deleteResponsesError } = await supabase
                          .from('sync_up_responses')
@@ -13878,6 +19138,15 @@ if (is_host === true) {
                          console.error('Error deleting old sync up responses:', deleteResponsesError);
                        }
 
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 're_sync',
+                         workflowStep: 'crew_members_fetch_started',
+                         executionStatus: 'pending',
+                         metadata: { sync_up_id: reSyncData.sync_up_id, crew_id: reSyncData.crew_id }
+                       });
+
                        // Get crew members for the sync up's crew
                        const { data: crewMembers } = await supabase
                          .from('crew_members')
@@ -13885,21 +19154,30 @@ if (is_host === true) {
                          .eq('crew_id', reSyncData.crew_id);
                        
                        if (crewMembers && crewMembers.length > 0) {
+                         logWorkflowProgress({
+                           supabase,
+                           userId,
+                           workflowName: 're_sync',
+                           workflowStep: 'sms_sending_started',
+                           executionStatus: 'pending',
+                           metadata: { sync_up_id: reSyncData.sync_up_id, crew_members_count: crewMembers.length }
+                         });
+                         
                          // Send new sync up SMS to each member
                          let successCount = 0;
                          for (const member of crewMembers) {
-                           if (member.contacts?.phone_number) {
-                             let smsMsg = `${reSyncData.crew_name} has new time options for ${reSyncData.sync_up_name} at ${reSyncData.location}.\n\n`;
-                             smsMsg += `Which work for you?\n`;
-                             reSyncData.time_options_parsed.forEach((opt, idx) => {
-                               const start = new Date(opt.start_time);
-                               const dateStr = start.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
-                               const startTimeStr = start.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-                               const end = opt.end_time ? new Date(opt.end_time) : null;
-                               const endTimeStr = end ? ` - ${end.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}` : '';
-                               smsMsg += `${idx + 1}. ${dateStr} ${startTimeStr}${endTimeStr}\n`;
-                             });
-                             smsMsg += `\nReply with numbers (e.g. '1 2')`;
+                          if (member.contacts?.phone_number) {
+                            let smsMsg = `${reSyncData.crew_name} has new time options for ${reSyncData.sync_up_name} at ${reSyncData.location}.\n\n`;
+                            smsMsg += `Which work for you?\n`;
+                            reSyncData.time_options_parsed.forEach((opt, idx) => {
+                              const start = new Date(opt.start_time);
+                              const dateStr = start.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
+                              const startTimeStr = start.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+                              const end = opt.end_time ? new Date(opt.end_time) : null;
+                              const endTimeStr = end ? ` - ${end.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}` : '';
+                              smsMsg += `${idx + 1}. ${dateStr} ${startTimeStr}${endTimeStr}\n`;
+                            });
+                            smsMsg += `\nReply with numbers (e.g. '1 2'.) or 'none' if these options don't work.`;
                                
                               const result = await sendSMS(member.contacts.phone_number, smsMsg, true, phone_number);
                              if (result.success) {
@@ -13936,32 +19214,52 @@ if (is_host === true) {
                                  }
                                }
                                
-                               // Create conversation_state for crew member
-                               console.log(`📝 Creating conversation_state for crew member: phone=${member.contacts.phone_number}`);
-                               
-                               // First, delete any existing conversation_state for this phone
-                               await supabase
-                                 .from('conversation_state')
-                                 .delete()
-                                 .eq('phone_number', member.contacts.phone_number);
-                               
-                               const { data: convStateData, error: convStateError } = await supabase
-                                 .from('conversation_state')
-                                 .insert({
-                                   phone_number: member.contacts.phone_number,
-                                   waiting_for: 'sync_up_response',
-                                   current_state: 'sync_up_response',
-                                   extracted_data: [{
-                                     action: 'SYNC_UP_RECEIVED',
-                                     sync_up_id: reSyncData.sync_up_id,
-                                     sync_up_name: reSyncData.sync_up_name,
-                                     crew_name: reSyncData.crew_name,
-                                     location: reSyncData.location,
-                                     time_options: reSyncData.time_options_parsed,
-                                     contact_id: actualContactId,
-                                     timestamp: new Date().toISOString()
-                                   }]
-                                 });
+                              // Create conversation_state for crew member
+                              console.log(`📝 Creating conversation_state for crew member: phone=${member.contacts.phone_number}`);
+                              
+                              // Update or insert conversation_state for crew member (crew members only, not host users)
+                              // First try to update existing record, then insert if none exists (no deletion)
+                              const updateData = {
+                                waiting_for: 'sync_up_response',
+                                current_state: 'sync_up_response',
+                                extracted_data: [{
+                                  action: 'SYNC_UP_RECEIVED',
+                                  sync_up_id: reSyncData.sync_up_id,
+                                  sync_up_name: reSyncData.sync_up_name,
+                                  crew_name: reSyncData.crew_name,
+                                  location: reSyncData.location,
+                                  time_options: reSyncData.time_options_parsed,
+                                  contact_id: actualContactId,
+                                  timestamp: new Date().toISOString()
+                                }],
+                                last_action: 'SYNC_UP_RECEIVED',
+                                last_action_timestamp: new Date().toISOString()
+                              };
+                              
+                              // Try to update existing record (crew members only)
+                              const { data: updateResult, error: updateError } = await supabase
+                                .from('conversation_state')
+                                .update(updateData)
+                                .eq('phone_number', member.contacts.phone_number)
+                                .is('user_id', null)
+                                .select();
+                              
+                              let convStateData = updateResult;
+                              let convStateError = updateError;
+                              
+                              // If no record was updated, insert a new one
+                              if (!updateError && (!updateResult || updateResult.length === 0)) {
+                                const { data: insertResult, error: insertError } = await supabase
+                                  .from('conversation_state')
+                                  .insert({
+                                    phone_number: member.contacts.phone_number,
+                                    user_id: null, // Explicitly set to null for crew members
+                                    ...updateData
+                                  })
+                                  .select();
+                                convStateData = insertResult;
+                                convStateError = insertError;
+                              }
                                
                                if (convStateError) {
                                  console.error(`❌ Error creating conversation_state:`, convStateError);
@@ -13995,6 +19293,15 @@ if (is_host === true) {
                            }
                          }
                          
+                         logWorkflowProgress({
+                           supabase,
+                           userId,
+                           workflowName: 're_sync',
+                           workflowStep: 'sms_sent',
+                           executionStatus: 'success',
+                           metadata: { sync_up_id: reSyncData.sync_up_id, success_count: successCount, total_members: crewMembers.length }
+                         });
+                         
                          // Build confirmation message with dates
                          const dateOptions = reSyncData.time_options_parsed.map(opt => {
                            const start = new Date(opt.start_time);
@@ -14015,7 +19322,29 @@ if (is_host === true) {
                              last_action_timestamp: new Date().toISOString()
                            })
                            .eq('user_id', userId);
+                         
+                         logWorkflowComplete({
+                           supabase,
+                           userId,
+                           workflowName: 're_sync',
+                           workflowStep: 'completed',
+                           executionStatus: 'success',
+                           metadata: { 
+                             sync_up_id: reSyncData.sync_up_id, 
+                             sync_up_name: reSyncData.sync_up_name, 
+                             time_options_count: reSyncData.time_options_parsed.length, 
+                             members_sent_to: successCount 
+                           }
+                         });
                        } else {
+                         logWorkflowProgress({
+                           supabase,
+                           userId,
+                           workflowName: 're_sync',
+                           workflowStep: 'no_crew_members_found',
+                           executionStatus: 'success',
+                           metadata: { sync_up_id: reSyncData.sync_up_id }
+                         });
                          responseContent = 'No crew members found for this sync up.';
                          shouldSendSMS = true;
                        }
@@ -14024,6 +19353,14 @@ if (is_host === true) {
                  }
                } catch (error) {
                  console.error('Error in RE_SYNC_CONFIRMATION_YES:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 're_sync',
+                   workflowStep: 'confirmation_received',
+                   error: error instanceof Error ? error : new Error(String(error)),
+                   metadata: {}
+                 });
                  responseContent = 'Failed to send new time options. Please try again.';
                  shouldSendSMS = true;
                }
@@ -14040,6 +19377,33 @@ if (is_host === true) {
                
              } else  if (action === 'RE_SYNC_CONFIRMATION_NO') {
                console.log('RE_SYNC_CONFIRMATION_NO detected via pattern matching');
+               
+               logWorkflowProgress({
+                 supabase,
+                 userId,
+                 workflowName: 're_sync',
+                 workflowStep: 'confirmation_declined',
+                 executionStatus: 'success',
+                 metadata: {}
+               });
+               
+               logWorkflowProgress({
+                 supabase,
+                 userId,
+                 workflowName: 're_sync',
+                 workflowStep: 'workflow_abandoned',
+                 executionStatus: 'success',
+                 metadata: {}
+               });
+               
+               logWorkflowComplete({
+                 supabase,
+                 userId,
+                 workflowName: 're_sync',
+                 workflowStep: 'cancelled',
+                 executionStatus: 'success',
+                 metadata: {}
+               });
                
                responseContent = 'What would you like to change? Type \'exit\' to cancel.';
                shouldSendSMS = true;
@@ -14068,6 +19432,15 @@ if (is_host === true) {
              } else if (action === 'RE_SYNC_CONFIRMATION_INVALID') {
                console.log('RE_SYNC_CONFIRMATION_INVALID detected via pattern matching');
                
+               logWorkflowProgress({
+                 supabase,
+                 userId,
+                 workflowName: 're_sync',
+                 workflowStep: 'invalid_confirmation_input',
+                 executionStatus: 'failure',
+                 metadata: { invalid_input: message }
+               });
+               
                responseContent = 'I didn\'t understand that. Reply \'yes\' to send new options, \'no\' to make changes, or \'exit\' to cancel.';
                shouldSendSMS = true;
                
@@ -14084,7 +19457,21 @@ if (is_host === true) {
              } else if (action === 'SYNC_UP_CONFIRMATION_YES') {
                console.log('SYNC_UP_CONFIRMATION_YES detected via pattern matching');
                
+               // Variables to track sync up creation for state update
+               let createdSyncUpRecord = null;
+               let createdNewEvent = null;
+               let createdSyncUpData = null;
+               
                try {
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up',
+                   workflowStep: 'confirmation_received',
+                   executionStatus: 'success',
+                   metadata: {}
+                 });
+                 
                  // Get sync up data from conversation state
                  let syncUpData = null;
                  if (conversationState?.extracted_data && Array.isArray(conversationState.extracted_data)) {
@@ -14098,9 +19485,31 @@ if (is_host === true) {
                  }
                  
                  if (!syncUpData) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up',
+                     workflowStep: 'sync_up_data_not_found',
+                     executionStatus: 'failure',
+                     metadata: { step: 'confirmation' }
+                   });
                    responseContent = 'Sync up data not found. Please start over.';
                    shouldSendSMS = true;
                  } else {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up',
+                     workflowStep: 'event_creation_started',
+                     executionStatus: 'pending',
+                     crewId: syncUpData.crew_id,
+                     metadata: { 
+                       crew_id: syncUpData.crew_id,
+                       event_name: syncUpData.event_name,
+                       location: syncUpData.location
+                     }
+                   });
+                   
                    // Create event with status 'pending' for sync up
                    console.log('Creating sync up event with data:', {
                      title: syncUpData.event_name,
@@ -14127,10 +19536,49 @@ if (is_host === true) {
                    if (eventError || !newEvent) {
                      console.error('Error creating sync up event:', eventError);
                      console.error('Event creation failed with error details:', JSON.stringify(eventError, null, 2));
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'sync_up',
+                       workflowStep: 'event_creation_failed',
+                       executionStatus: 'failure',
+                       crewId: syncUpData.crew_id,
+                       metadata: { 
+                         crew_id: syncUpData.crew_id,
+                         error: eventError?.message || String(eventError)
+                       }
+                     });
                      responseContent = `Failed to create sync up. Error: ${eventError?.message || 'Unknown error'}. Please try again.`;
                      shouldSendSMS = true;
                    } else {
                      console.log('Sync up event created successfully:', newEvent);
+                     
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'sync_up',
+                       workflowStep: 'event_created',
+                       executionStatus: 'success',
+                       crewId: syncUpData.crew_id,
+                       metadata: { 
+                         crew_id: syncUpData.crew_id,
+                         event_id: newEvent.id,
+                         event_name: syncUpData.event_name
+                       }
+                     });
+                     
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'sync_up',
+                       workflowStep: 'sync_up_record_creation_started',
+                       executionStatus: 'pending',
+                       crewId: syncUpData.crew_id,
+                       metadata: { 
+                         crew_id: syncUpData.crew_id,
+                         event_id: newEvent.id
+                       }
+                     });
                      
                      // Create sync_up record
                      const { data: syncUpRecord, error: syncUpError } = await supabase
@@ -14148,9 +19596,55 @@ if (is_host === true) {
                      
                      if (syncUpError) {
                        console.error('Error creating sync up record:', syncUpError);
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'sync_up',
+                         workflowStep: 'sync_up_record_creation_failed',
+                         executionStatus: 'failure',
+                         crewId: syncUpData.crew_id,
+                         metadata: { 
+                           crew_id: syncUpData.crew_id,
+                           event_id: newEvent.id,
+                           error: syncUpError?.message || String(syncUpError)
+                         }
+                       });
                        responseContent = 'Failed to create sync up record. Please try again.';
                        shouldSendSMS = true;
                      } else {
+                       // Store references for state update
+                       createdSyncUpRecord = syncUpRecord;
+                       createdNewEvent = newEvent;
+                       createdSyncUpData = syncUpData;
+                       
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'sync_up',
+                         workflowStep: 'sync_up_record_created',
+                         executionStatus: 'success',
+                         crewId: syncUpData.crew_id,
+                         metadata: { 
+                           crew_id: syncUpData.crew_id,
+                           sync_up_id: syncUpRecord.id,
+                           event_id: newEvent.id
+                         }
+                       });
+                       
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'sync_up',
+                         workflowStep: 'sync_up_options_creation_started',
+                         executionStatus: 'pending',
+                         crewId: syncUpData.crew_id,
+                         metadata: { 
+                           crew_id: syncUpData.crew_id,
+                           sync_up_id: syncUpRecord.id,
+                           time_options_count: syncUpData.time_options_parsed.length
+                         }
+                       });
+                       
                        // Create sync up options
                        const syncUpOptions = syncUpData.time_options_parsed.map(option => ({
                          sync_up_id: syncUpRecord.id,
@@ -14166,9 +19660,49 @@ if (is_host === true) {
 
                        if (optionsError) {
                          console.error('Error creating sync up options:', optionsError);
+                         logWorkflowProgress({
+                           supabase,
+                           userId,
+                           workflowName: 'sync_up',
+                           workflowStep: 'sync_up_options_creation_failed',
+                           executionStatus: 'failure',
+                           crewId: syncUpData.crew_id,
+                           metadata: { 
+                             crew_id: syncUpData.crew_id,
+                             sync_up_id: syncUpRecord.id,
+                             error: optionsError?.message || String(optionsError)
+                           }
+                         });
                          responseContent = 'Failed to create sync up options. Please try again.';
                          shouldSendSMS = true;
                        } else {
+                         logWorkflowProgress({
+                           supabase,
+                           userId,
+                           workflowName: 'sync_up',
+                           workflowStep: 'sync_up_options_created',
+                           executionStatus: 'success',
+                           crewId: syncUpData.crew_id,
+                           metadata: { 
+                             crew_id: syncUpData.crew_id,
+                             sync_up_id: syncUpRecord.id,
+                             time_options_count: syncUpOptions.length
+                           }
+                         });
+                         
+                         logWorkflowProgress({
+                           supabase,
+                           userId,
+                           workflowName: 'sync_up',
+                           workflowStep: 'crew_members_fetch_started',
+                           executionStatus: 'pending',
+                           crewId: syncUpData.crew_id,
+                           metadata: { 
+                             crew_id: syncUpData.crew_id,
+                             sync_up_id: syncUpRecord.id
+                           }
+                         });
+                         
                          // Get crew members for the event's crew
                          const { data: crewMembers } = await supabase
                            .from('crew_members')
@@ -14176,6 +19710,19 @@ if (is_host === true) {
                            .eq('crew_id', syncUpData.crew_id);
                          
                          if (crewMembers && crewMembers.length > 0) {
+                           logWorkflowProgress({
+                             supabase,
+                             userId,
+                             workflowName: 'sync_up',
+                             workflowStep: 'sms_sending_started',
+                             executionStatus: 'pending',
+                             crewId: syncUpData.crew_id,
+                             metadata: { 
+                               crew_id: syncUpData.crew_id,
+                               sync_up_id: syncUpRecord.id,
+                               crew_members_count: crewMembers.length
+                             }
+                           });
                            // Get host name from profile
                            let hostName = syncUpData.crew_name; // Fallback to crew name
                            try {
@@ -14237,18 +19784,18 @@ if (is_host === true) {
                            // Send sync up SMS to each member and update their conversation state
                            let successCount = 0;
                            for (const member of crewMembers) {
-                             if (member.contacts?.phone_number) {
-                               // Format: "[Host Name] wants to find time for [Event Name] at [Location]. Which work for you?"
-                               let smsMsg = `${hostName} wants to find time for ${syncUpData.event_name} at ${syncUpData.location}. Which work for you? `;
-                               
-                               // Add time options in format: "1. Thu 12/19 6-8pm 2. Sat 12/21 10am-12pm"
-                               syncUpData.time_options_parsed.forEach((opt, idx) => {
-                                 const timeStr = formatTimeOptionSimple(opt.start_time, opt.end_time || null);
-                                 smsMsg += `${idx + 1}. ${timeStr} `;
-                               });
-                               
-                               // Add reply instructions
-                               smsMsg += `Reply with numbers (e.g. '1 2'). Reply 'none' if these don't work.`;
+                            if (member.contacts?.phone_number) {
+                              // Format: "[Host Name] wants to find time for [Event Name] at [Location]. Which work for you?"
+                              let smsMsg = `${hostName} wants to find time for ${syncUpData.event_name} at ${syncUpData.location}. Which work for you?\n`;
+                              
+                              // Add time options in format: one per line
+                              syncUpData.time_options_parsed.forEach((opt, idx) => {
+                                const timeStr = formatTimeOptionSimple(opt.start_time, opt.end_time || null);
+                                smsMsg += `${idx + 1}. ${timeStr}\n`;
+                              });
+                              
+                              // Add reply instructions
+                              smsMsg += `Reply with numbers (e.g. '1 2'.) or 'none' if these options don't work.`;
                                
                                const result = await sendSMS(member.contacts.phone_number, smsMsg, true, phone_number);
                               if (result.success) {
@@ -14285,32 +19832,52 @@ if (is_host === true) {
                                  }
                                }
                                
-                               // Always create conversation_state by phone_number (crew members don't have user_id/profile)
-                               console.log(`📝 Creating conversation_state for crew member: phone=${member.contacts.phone_number}`);
-                               
-                               // First, delete any existing conversation_state for this phone to ensure only 1 record
-                               await supabase
-                                 .from('conversation_state')
-                                 .delete()
-                                 .eq('phone_number', member.contacts.phone_number);
-                               
-                               const { data: convStateData, error: convStateError } = await supabase
-                                 .from('conversation_state')
-                                 .insert({
-                                   phone_number: member.contacts.phone_number,
-                                   waiting_for: 'sync_up_response',
-                                   current_state: 'sync_up_response',
-                                   extracted_data: [{
-                                     action: 'SYNC_UP_RECEIVED',
-                                     sync_up_id: syncUpRecord.id,
-                                     sync_up_name: syncUpData.event_name,
-                                     crew_name: syncUpData.crew_name,
-                                     location: syncUpData.location,
-                                     time_options: syncUpData.time_options_parsed,
-                                     contact_id: actualContactId, // Store contact_id in extracted_data for reference
-                                     timestamp: new Date().toISOString()
-                                   }]
-                                 });
+                              // Always create conversation_state by phone_number (crew members don't have user_id/profile)
+                              console.log(`📝 Creating conversation_state for crew member: phone=${member.contacts.phone_number}`);
+                              
+                              // Update or insert conversation_state for crew member (crew members only, not host users)
+                              // First try to update existing record, then insert if none exists (no deletion)
+                              const updateData = {
+                                waiting_for: 'sync_up_response',
+                                current_state: 'sync_up_response',
+                                extracted_data: [{
+                                  action: 'SYNC_UP_RECEIVED',
+                                  sync_up_id: syncUpRecord.id,
+                                  sync_up_name: syncUpData.event_name,
+                                  crew_name: syncUpData.crew_name,
+                                  location: syncUpData.location,
+                                  time_options: syncUpData.time_options_parsed,
+                                  contact_id: actualContactId, // Store contact_id in extracted_data for reference
+                                  timestamp: new Date().toISOString()
+                                }],
+                                last_action: 'SYNC_UP_RECEIVED',
+                                last_action_timestamp: new Date().toISOString()
+                              };
+                              
+                              // Try to update existing record (crew members only)
+                              const { data: updateResult, error: updateError } = await supabase
+                                .from('conversation_state')
+                                .update(updateData)
+                                .eq('phone_number', member.contacts.phone_number)
+                                .is('user_id', null)
+                                .select();
+                              
+                              let convStateData = updateResult;
+                              let convStateError = updateError;
+                              
+                              // If no record was updated, insert a new one
+                              if (!updateError && (!updateResult || updateResult.length === 0)) {
+                                const { data: insertResult, error: insertError } = await supabase
+                                  .from('conversation_state')
+                                  .insert({
+                                    phone_number: member.contacts.phone_number,
+                                    user_id: null, // Explicitly set to null for crew members
+                                    ...updateData
+                                  })
+                                  .select();
+                                convStateData = insertResult;
+                                convStateError = insertError;
+                              }
                                
                                if (convStateError) {
                                  console.error(`❌ Error creating conversation_state:`, convStateError);
@@ -14344,22 +19911,90 @@ if (is_host === true) {
                              }
                            }
                            
+                           logWorkflowProgress({
+                             supabase,
+                             userId,
+                             workflowName: 'sync_up',
+                             workflowStep: 'sms_sent',
+                             executionStatus: 'success',
+                             crewId: syncUpData.crew_id,
+                             metadata: { 
+                               crew_id: syncUpData.crew_id,
+                               sync_up_id: syncUpRecord.id,
+                               success_count: successCount,
+                               total_members: crewMembers.length
+                             }
+                           });
+                           
+                           logWorkflowComplete({
+                             supabase,
+                             userId,
+                             workflowName: 'sync_up',
+                             workflowStep: 'completed',
+                             executionStatus: 'success',
+                             crewId: syncUpData.crew_id,
+                             metadata: { 
+                               crew_id: syncUpData.crew_id,
+                               sync_up_id: syncUpRecord.id,
+                               event_id: newEvent.id,
+                               event_name: syncUpData.event_name,
+                               location: syncUpData.location,
+                               time_options_count: syncUpData.time_options_parsed.length,
+                               members_sent_to: successCount,
+                               total_members: crewMembers.length
+                             }
+                           });
+                           
                            responseContent = `Sync up sent to ${successCount} crew member${successCount !== 1 ? 's' : ''} for ${syncUpData.event_name}. Text 'Sync Check' to see responses or to send invitations.`;
                            shouldSendSMS = true;
                          } else {
+                           logWorkflowProgress({
+                             supabase,
+                             userId,
+                             workflowName: 'sync_up',
+                             workflowStep: 'no_crew_members_found',
+                             executionStatus: 'success',
+                             crewId: syncUpData.crew_id,
+                             metadata: { 
+                               crew_id: syncUpData.crew_id,
+                               sync_up_id: syncUpRecord.id
+                             }
+                           });
                            responseContent = 'No crew members found to send sync up to.';
                            shouldSendSMS = true;
                          }
                        }
                      }
-                   }
-                   
-                   // Clear conversation state
-                   await supabase
-                     .from('conversation_state')
-                     .delete()
-                     .eq('user_id', userId);
-                 }
+                  }
+                  
+                  // Update conversation state to normal, preserving sync_up_id for reference
+                  // Only update if sync up was successfully created
+                  if (createdSyncUpRecord && createdNewEvent && createdSyncUpData) {
+                    try {
+                      await supabase
+                        .from('conversation_state')
+                        .update({
+                          current_state: 'normal',
+                          waiting_for: null,
+                          last_action: 'SYNC_UP_COMPLETED',
+                          last_action_timestamp: new Date().toISOString(),
+                          extracted_data: [{
+                            action: 'SYNC_UP_COMPLETED',
+                            sync_up_id: createdSyncUpRecord.id,
+                            event_id: createdNewEvent.id,
+                            event_name: createdSyncUpData.event_name,
+                            crew_id: createdSyncUpData.crew_id,
+                            timestamp: new Date().toISOString()
+                          }]
+                        })
+                        .eq('user_id', userId);
+                      console.log('✅ Conversation state updated with sync_up_id:', createdSyncUpRecord.id);
+                    } catch (updateError) {
+                      console.error('❌ Error updating conversation state after sync up creation:', updateError);
+                      // Don't fail the whole operation if state update fails
+                    }
+                  }
+                }
                  
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
                  
@@ -14373,6 +20008,40 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in SYNC_UP_CONFIRMATION_YES:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up',
+                   workflowStep: 'confirmation_yes',
+                   metadata: { error: error?.message || String(error) }
+                 });
+                 
+                 // Update conversation state even if there was an error, if sync up was created
+                 if (createdSyncUpRecord && createdNewEvent && createdSyncUpData) {
+                   try {
+                     await supabase
+                       .from('conversation_state')
+                       .update({
+                         current_state: 'normal',
+                         waiting_for: null,
+                         last_action: 'SYNC_UP_COMPLETED',
+                         last_action_timestamp: new Date().toISOString(),
+                         extracted_data: [{
+                           action: 'SYNC_UP_COMPLETED',
+                           sync_up_id: createdSyncUpRecord.id,
+                           event_id: createdNewEvent.id,
+                           event_name: createdSyncUpData.event_name,
+                           crew_id: createdSyncUpData.crew_id,
+                           timestamp: new Date().toISOString()
+                         }]
+                       })
+                       .eq('user_id', userId);
+                     console.log('✅ Conversation state updated in catch block with sync_up_id:', createdSyncUpRecord.id);
+                   } catch (updateError) {
+                     console.error('❌ Error updating conversation state in catch block:', updateError);
+                   }
+                 }
+                 
                  responseContent = 'Failed to send sync up. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -14656,9 +20325,27 @@ if (is_host === true) {
                 }
                 
                 if (!partialSyncUpData) {
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'sync_up',
+                    workflowStep: 'sync_up_data_not_found',
+                    executionStatus: 'failure',
+                    metadata: { step: 'event_name_input' }
+                  });
                   responseContent = 'No sync up data found. Please start over by saying "sync up".';
                   shouldSendSMS = true;
                 } else {
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'sync_up',
+                    workflowStep: 'event_name_provided',
+                    executionStatus: 'success',
+                    crewId: partialSyncUpData.crew_id,
+                    metadata: { crew_id: partialSyncUpData.crew_id, event_name: eventName }
+                  });
+                  
                   const updatedSyncUpData = {
                     ...partialSyncUpData,
                     event_name: eventName
@@ -14691,6 +20378,13 @@ if (is_host === true) {
                 });
               } catch (error) {
                 console.error('Error in PARTIAL_SYNC_UP_EVENT_NAME pattern matching:', error);
+                logWorkflowError({
+                  supabase,
+                  userId,
+                  workflowName: 'sync_up',
+                  workflowStep: 'event_name_input',
+                  metadata: { error: error?.message || String(error) }
+                });
                 responseContent = 'Failed to process event name. Please try again.';
                 shouldSendSMS = true;
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -14728,9 +20422,27 @@ if (is_host === true) {
                 }
                 
                 if (!partialSyncUpData) {
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'sync_up',
+                    workflowStep: 'sync_up_data_not_found',
+                    executionStatus: 'failure',
+                    metadata: { step: 'location_input' }
+                  });
                   responseContent = 'No sync up data found. Please start over by saying "sync up".';
                   shouldSendSMS = true;
                 } else {
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'sync_up',
+                    workflowStep: 'location_provided',
+                    executionStatus: 'success',
+                    crewId: partialSyncUpData.crew_id,
+                    metadata: { crew_id: partialSyncUpData.crew_id, location: location }
+                  });
+                  
                   const updatedSyncUpData = {
                     ...partialSyncUpData,
                     location: location
@@ -14763,6 +20475,13 @@ if (is_host === true) {
                 });
               } catch (error) {
                 console.error('Error in PARTIAL_SYNC_UP_LOCATION pattern matching:', error);
+                logWorkflowError({
+                  supabase,
+                  userId,
+                  workflowName: 'sync_up',
+                  workflowStep: 'location_input',
+                  metadata: { error: error?.message || String(error) }
+                });
                 responseContent = 'Failed to process location. Please try again.';
                 shouldSendSMS = true;
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -14800,9 +20519,30 @@ if (is_host === true) {
                 }
                 
                 if (!partialSyncUpData) {
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'sync_up',
+                    workflowStep: 'sync_up_data_not_found',
+                    executionStatus: 'failure',
+                    metadata: { step: 'time_options_input' }
+                  });
                   responseContent = 'No sync up data found. Please start over by saying "sync up".';
                   shouldSendSMS = true;
                 } else {
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'sync_up',
+                    workflowStep: 'time_options_provided',
+                    executionStatus: 'success',
+                    crewId: partialSyncUpData.crew_id,
+                    metadata: { 
+                      crew_id: partialSyncUpData.crew_id, 
+                      time_options_count: timeOptions?.length || 0 
+                    }
+                  });
+                  
                   const updatedSyncUpData = {
                     ...partialSyncUpData,
                     time_options_parsed: timeOptions
@@ -14835,6 +20575,13 @@ if (is_host === true) {
                 });
               } catch (error) {
                 console.error('Error in PARTIAL_SYNC_UP_TIME_OPTIONS pattern matching:', error);
+                logWorkflowError({
+                  supabase,
+                  userId,
+                  workflowName: 'sync_up',
+                  workflowStep: 'time_options_input',
+                  metadata: { error: error?.message || String(error) }
+                });
                 responseContent = 'Failed to process time options. Please try again.';
                 shouldSendSMS = true;
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -14872,6 +20619,14 @@ if (is_host === true) {
                 }
                 
                 if (!partialSyncUpData) {
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'sync_up',
+                    workflowStep: 'sync_up_data_not_found',
+                    executionStatus: 'failure',
+                    metadata: { step: 'notes_input' }
+                  });
                   responseContent = 'No sync up data found. Please start over by saying "sync up".';
                   shouldSendSMS = true;
                 } else {
@@ -14879,6 +20634,20 @@ if (is_host === true) {
                     ...partialSyncUpData,
                     notes: notes || null
                   };
+                  
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'sync_up',
+                    workflowStep: 'notes_provided',
+                    executionStatus: 'success',
+                    crewId: finalSyncUpData.crew_id,
+                    metadata: { 
+                      crew_id: finalSyncUpData.crew_id, 
+                      has_notes: !!notes,
+                      event_name: finalSyncUpData.event_name
+                    }
+                  });
                   
                   // Build confirmation message
                   responseContent = await formatSyncUpConfirmation({
@@ -14889,6 +20658,21 @@ if (is_host === true) {
                     time_options_parsed: finalSyncUpData.time_options_parsed,
                     notes: finalSyncUpData.notes
                   }, supabase);
+                  
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'sync_up',
+                    workflowStep: 'confirmation_shown',
+                    executionStatus: 'success',
+                    crewId: finalSyncUpData.crew_id,
+                    metadata: { 
+                      crew_id: finalSyncUpData.crew_id,
+                      event_name: finalSyncUpData.event_name,
+                      location: finalSyncUpData.location,
+                      time_options_count: finalSyncUpData.time_options_parsed?.length || 0
+                    }
+                  });
                   
                   shouldSendSMS = true;
                   
@@ -14926,6 +20710,13 @@ if (is_host === true) {
                 });
               } catch (error) {
                 console.error('Error in PARTIAL_SYNC_UP_NOTES pattern matching:', error);
+                logWorkflowError({
+                  supabase,
+                  userId,
+                  workflowName: 'sync_up',
+                  workflowStep: 'notes_input',
+                  metadata: { error: error?.message || String(error) }
+                });
                 responseContent = 'Failed to process notes. Please try again.';
                 shouldSendSMS = true;
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -14941,6 +20732,14 @@ if (is_host === true) {
               }
             } else if (action === 'INVALID_SYNC_UP_EVENT_NAME_INPUT') {
               console.log('INVALID_SYNC_UP_EVENT_NAME_INPUT detected via pattern matching');
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'sync_up',
+                workflowStep: 'invalid_input',
+                executionStatus: 'failure',
+                metadata: { step: 'event_name_input' }
+              });
               responseContent = "I didn't understand that. What should we call the event? Type 'exit' to cancel.";
               shouldSendSMS = true;
               await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -14955,6 +20754,14 @@ if (is_host === true) {
               });
             } else if (action === 'INVALID_SYNC_UP_LOCATION_INPUT') {
               console.log('INVALID_SYNC_UP_LOCATION_INPUT detected via pattern matching');
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'sync_up',
+                workflowStep: 'invalid_input',
+                executionStatus: 'failure',
+                metadata: { step: 'location_input' }
+              });
               responseContent = "I didn't understand that. What's the event location? Type 'exit' to cancel.";
               shouldSendSMS = true;
               await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -14969,6 +20776,14 @@ if (is_host === true) {
               });
             } else if (action === 'INVALID_SYNC_UP_TIME_OPTIONS_INPUT') {
               console.log('INVALID_SYNC_UP_TIME_OPTIONS_INPUT detected via pattern matching');
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'sync_up',
+                workflowStep: 'invalid_input',
+                executionStatus: 'failure',
+                metadata: { step: 'time_options_input' }
+              });
               responseContent = "I didn't understand that. Give me 1-3 time options (date and time for each). Example: 12/19 6-8pm, 12/21 10am (end time optional). Type 'exit' to cancel.";
               shouldSendSMS = true;
               await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -14983,6 +20798,14 @@ if (is_host === true) {
               });
             } else if (action === 'INVALID_SYNC_UP_NOTES_INPUT') {
               console.log('INVALID_SYNC_UP_NOTES_INPUT detected via pattern matching');
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'sync_up',
+                workflowStep: 'invalid_input',
+                executionStatus: 'failure',
+                metadata: { step: 'notes_input' }
+              });
               responseContent = "I didn't understand that. Add a note or type 'n' to skip. Type 'exit' to cancel.";
               shouldSendSMS = true;
               await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -14997,6 +20820,15 @@ if (is_host === true) {
               });
             } else if (action === 'SYNC_UP_CONFIRMATION_INVALID') {
               console.log('SYNC_UP_CONFIRMATION_INVALID detected via pattern matching');
+              
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'sync_up',
+                workflowStep: 'invalid_input',
+                executionStatus: 'failure',
+                metadata: { step: 'confirmation' }
+              });
               
               responseContent = `I didn't understand that. Reply 'yes' to send sync up, 'no' to make changes, or 'exit' to cancel.`;
               shouldSendSMS = true;
@@ -15025,6 +20857,15 @@ if (is_host === true) {
             } else if (action === 'SYNC_UP_CONFIRMATION_NO') {
               console.log('SYNC_UP_CONFIRMATION_NO detected via pattern matching');
               
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'sync_up',
+                workflowStep: 'confirmation_cancelled',
+                executionStatus: 'success',
+                metadata: {}
+              });
+              
               responseContent = 'What would you like to change? Type \'exit\' to cancel.';
               shouldSendSMS = true;
               
@@ -15052,58 +20893,205 @@ if (is_host === true) {
              } else if (action === 'RE_SYNC') {
                console.log('RE_SYNC detected via pattern matching');
                
-               // This action is HOST ONLY - verify is_host=true
-               if (!is_host) {
-                 console.log('Non-host attempted to re-sync');
-                 return new Response(JSON.stringify({
-                   success: false,
-                   error: 'This feature is only available for hosts'
-                 }), { 
-                   status: 403,
-                   headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+               try {
+                 logWorkflowStart({
+                   supabase,
+                   userId,
+                   workflowName: 're_sync',
+                   workflowStep: 'initiated',
+                   metadata: {}
                  });
-               }
-               
-               const eventName = extractedData.eventName;
-               
-               // Query user's active sync ups (created by this host)
-               const { data: syncUps, error: syncUpsError } = await supabase
-                 .from('sync_ups')
-                 .select(`
-                   id,
-                   name,
-                   location,
-                   created_at,
-                   events!inner (id, title, location, creator_id, event_date),
-                   crews (id, name)
-                 `)
-                 .eq('events.creator_id', userId)
-                 .eq('status', 'sent')
-                 .order('created_at', { ascending: false });
-               
-               if (syncUpsError || !syncUps || syncUps.length === 0) {
-                 responseContent = 'No active sync ups found. Type \'Sync Up\' to create one or \'exit\' to do something else.';
-                 shouldSendSMS = true;
-                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
                  
-                 return new Response(JSON.stringify({
-                   success: true,
-                   action: 'RE_SYNC',
-                   response: responseContent,
-                   optimization: 'pattern_matching'
-                 }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
-               }
-               
-               // If event name provided, try to find matching sync up
-               if (eventName) {
-                 const matchingSyncUp = syncUps.find(syncUp => 
-                   syncUp.name.toLowerCase().includes(eventName.toLowerCase()) ||
-                   syncUp.events.title.toLowerCase().includes(eventName.toLowerCase())
-                 );
+                 // This action is HOST ONLY - verify is_host=true
+                 if (!is_host) {
+                   console.log('Non-host attempted to re-sync');
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 're_sync',
+                     workflowStep: 'non_host_attempted',
+                     executionStatus: 'failure',
+                     metadata: {}
+                   });
+                   return new Response(JSON.stringify({
+                     success: false,
+                     error: 'This feature is only available for hosts'
+                   }), { 
+                     status: 403,
+                     headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                   });
+                 }
                  
-                 if (matchingSyncUp) {
-                   // Skip selection, go directly to time options
-                   responseContent = `Add up to 3 new time options for ${matchingSyncUp.name} at ${matchingSyncUp.location}: Date, start time, end time optional. Example: 12/26 6-8pm, 12/28 10am-12pm`;
+                 const eventName = extractedData.eventName;
+                 
+                 // Query user's active sync ups (created by this host, upcoming events only)
+                 // First get upcoming event IDs
+                 const { data: upcomingEvents } = await supabase
+                   .from('events')
+                   .select('id, event_date')
+                   .eq('creator_id', userId)
+                   .gte('event_date', new Date().toISOString().split('T')[0])
+                   .order('event_date', { ascending: true });
+                 
+                 const upcomingEventIds = upcomingEvents?.map(e => e.id) || [];
+                 
+                 if (upcomingEventIds.length === 0) {
+                   // No upcoming events, so no sync-ups to show
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 're_sync',
+                     workflowStep: 'no_upcoming_events',
+                     executionStatus: 'success',
+                     metadata: {}
+                   });
+                   responseContent = 'No active sync ups found. Type \'Sync Up\' to create one or \'exit\' to do something else.';
+                   shouldSendSMS = true;
+                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                   
+                   return new Response(JSON.stringify({
+                     success: true,
+                     action: 'RE_SYNC',
+                     response: responseContent,
+                     optimization: 'pattern_matching'
+                   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+                 }
+                 
+                 const { data: syncUps, error: syncUpsError } = await supabase
+                   .from('sync_ups')
+                   .select(`
+                     id,
+                     name,
+                     location,
+                     created_at,
+                     events!inner (id, title, location, creator_id, event_date),
+                     crews (id, name)
+                   `)
+                   .in('event_id', upcomingEventIds)
+                   .eq('status', 'sent');
+                 
+                 // Sort by event_date in memory
+                 if (syncUps) {
+                   syncUps.sort((a, b) => {
+                     const aDate = a.events?.event_date || '';
+                     const bDate = b.events?.event_date || '';
+                     return aDate.localeCompare(bDate);
+                   });
+                 }
+                 
+                 if (syncUpsError || !syncUps || syncUps.length === 0) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 're_sync',
+                     workflowStep: syncUpsError ? 'sync_ups_fetch_failed' : 'no_sync_ups_found',
+                     executionStatus: syncUpsError ? 'failure' : 'success',
+                     metadata: syncUpsError ? { error: syncUpsError.message || String(syncUpsError) } : {}
+                   });
+                   responseContent = 'No active sync ups found. Type \'Sync Up\' to create one or \'exit\' to do something else.';
+                   shouldSendSMS = true;
+                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                   
+                   return new Response(JSON.stringify({
+                     success: true,
+                     action: 'RE_SYNC',
+                     response: responseContent,
+                     optimization: 'pattern_matching'
+                   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+                 }
+                 
+                 // If event name provided, try to find matching sync up
+                 if (eventName) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 're_sync',
+                     workflowStep: 'event_name_specified',
+                     executionStatus: 'success',
+                     metadata: { event_name: eventName }
+                   });
+                   
+                   const matchingSyncUp = syncUps.find(syncUp => 
+                     syncUp.name.toLowerCase().includes(eventName.toLowerCase()) ||
+                     syncUp.events.title.toLowerCase().includes(eventName.toLowerCase())
+                   );
+                   
+                   if (matchingSyncUp) {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 're_sync',
+                       workflowStep: 'sync_up_found_by_name',
+                       executionStatus: 'success',
+                       metadata: { sync_up_id: matchingSyncUp.id, sync_up_name: matchingSyncUp.name }
+                     });
+                     
+                     // Skip selection, go directly to time options
+                     responseContent = `Add up to 3 new time options for ${matchingSyncUp.name} at ${matchingSyncUp.location}: Date, start time, end time optional. Example: 12/26 6-8pm, 12/28 10am-12pm`;
+                     shouldSendSMS = true;
+                     
+                    await supabase
+                      .from('conversation_state')
+                      .upsert({
+                        user_id: userId,
+                        phone_number: phone_number.replace(/\D/g, ''),
+                        current_state: 're_sync_time_options',
+                        waiting_for: 're_sync_time_options',
+                        extracted_data: [{
+                          action: 'RE_SYNC_SYNC_UP_SELECTED',
+                          sync_up_id: matchingSyncUp.id,
+                          sync_up_name: matchingSyncUp.name,
+                          location: matchingSyncUp.location,
+                          crew_id: matchingSyncUp.crews.id,
+                          crew_name: matchingSyncUp.crews.name,
+                          timestamp: new Date().toISOString()
+                        }]
+                      }, {
+                        onConflict: 'user_id'
+                      });
+                     
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 're_sync',
+                       workflowStep: 'time_options_prompt_shown',
+                       executionStatus: 'success',
+                       metadata: { sync_up_id: matchingSyncUp.id, sync_up_name: matchingSyncUp.name }
+                     });
+                     
+                     await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                     
+                     return new Response(JSON.stringify({
+                       success: true,
+                       action: 'RE_SYNC',
+                       response: responseContent,
+                       optimization: 'pattern_matching'
+                     }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+                   } else {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 're_sync',
+                       workflowStep: 'sync_up_not_found_by_name',
+                       executionStatus: 'success',
+                       metadata: { requested_event_name: eventName }
+                     });
+                   }
+                 }
+                 
+                 // If one sync up, skip selection
+                 if (syncUps.length === 1) {
+                   const syncUp = syncUps[0];
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 're_sync',
+                     workflowStep: 'single_sync_up_auto_selected',
+                     executionStatus: 'success',
+                     metadata: { sync_up_id: syncUp.id, sync_up_name: syncUp.name }
+                   });
+                   
+                   responseContent = `Add up to 3 new time options for ${syncUp.name} at ${syncUp.location}: Date, start time, end time optional. Example: 12/26 6-8pm, 12/28 10am-12pm`;
                    shouldSendSMS = true;
                    
                   await supabase
@@ -15115,55 +21103,108 @@ if (is_host === true) {
                       waiting_for: 're_sync_time_options',
                       extracted_data: [{
                         action: 'RE_SYNC_SYNC_UP_SELECTED',
-                        sync_up_id: matchingSyncUp.id,
-                        sync_up_name: matchingSyncUp.name,
-                        location: matchingSyncUp.location,
-                        crew_id: matchingSyncUp.crews.id,
-                        crew_name: matchingSyncUp.crews.name,
+                        sync_up_id: syncUp.id,
+                        sync_up_name: syncUp.name,
+                        location: syncUp.location,
+                        crew_id: syncUp.crews.id,
+                        crew_name: syncUp.crews.name,
                         timestamp: new Date().toISOString()
                       }]
                     }, {
                       onConflict: 'user_id'
                     });
-                   
-                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                   
-                   return new Response(JSON.stringify({
-                     success: true,
-                     action: 'RE_SYNC',
-                     response: responseContent,
-                     optimization: 'pattern_matching'
-                   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+                  
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 're_sync',
+                    workflowStep: 'time_options_prompt_shown',
+                    executionStatus: 'success',
+                    metadata: { sync_up_id: syncUp.id, sync_up_name: syncUp.name }
+                  });
+                  
+                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                  
+                  return new Response(JSON.stringify({
+                    success: true,
+                    action: 'RE_SYNC',
+                    response: responseContent,
+                    optimization: 'pattern_matching'
+                  }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
                  }
-               }
-               
-               // If one sync up, skip selection
-               if (syncUps.length === 1) {
-                 const syncUp = syncUps[0];
-                 responseContent = `Add up to 3 new time options for ${syncUp.name} at ${syncUp.location}: Date, start time, end time optional. Example: 12/26 6-8pm, 12/28 10am-12pm`;
+                 
+                 // Multiple sync ups - show selection list with time options
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 're_sync',
+                   workflowStep: 'multiple_sync_ups_list_shown',
+                   executionStatus: 'success',
+                   metadata: { sync_ups_count: syncUps.length }
+                 });
+                 
+                 let syncUpList = 'Send new time options for which sync up?\n';
+                 
+                 // Fetch sync up options for each sync up and format the list
+                 for (let index = 0; index < syncUps.length; index++) {
+                   const syncUp = syncUps[index];
+                   
+                   // Fetch sync up options for this sync up
+                   const { data: syncUpOptions } = await supabase
+                     .from('sync_up_options')
+                     .select('*')
+                     .eq('sync_up_id', syncUp.id)
+                     .neq('idx', 0) // Exclude global None option
+                     .order('idx', { ascending: true });
+                   
+                   // Format time options - show date and time for each option
+                   let timeOptionsText = '';
+                   if (syncUpOptions && syncUpOptions.length > 0) {
+                     const formattedOptions = syncUpOptions
+                       .map(opt => {
+                         const { dayMonth, timeText } = formatTimeRangeForOptionGlobal(opt.start_time, opt.end_time);
+                         // Format: "Thu 12/19, 6-8pm" or just date if no time
+                         return timeText ? `${dayMonth}, ${timeText}` : dayMonth;
+                       })
+                       .filter(opt => opt.length > 0);
+                     
+                     if (formattedOptions.length > 0) {
+                       // Join with " or " to match expected format: "Thu 12/19, 6-8pm or Sat 12/21, 10am-12pm"
+                       timeOptionsText = formattedOptions.join(' or ');
+                     }
+                   }
+                   
+                   // Build the list item
+                   if (timeOptionsText) {
+                     syncUpList += `${index + 1}. ${syncUp.name} - ${timeOptionsText}\n`;
+                   } else {
+                     // Fallback if no options found
+                     syncUpList += `${index + 1}. ${syncUp.name}\n`;
+                   }
+                 }
+                 
+                 syncUpList += 'Reply with the sync up number or \'exit\'.';
+                 
+                 responseContent = syncUpList;
                  shouldSendSMS = true;
                  
-                await supabase
-                  .from('conversation_state')
-                  .upsert({
-                    user_id: userId,
-                    phone_number: phone_number.replace(/\D/g, ''),
-                    current_state: 're_sync_time_options',
-                    waiting_for: 're_sync_time_options',
-                    extracted_data: [{
-                      action: 'RE_SYNC_SYNC_UP_SELECTED',
-                      sync_up_id: syncUp.id,
-                      sync_up_name: syncUp.name,
-                      location: syncUp.location,
-                      crew_id: syncUp.crews.id,
-                      crew_name: syncUp.crews.name,
-                      timestamp: new Date().toISOString()
-                    }]
-                  }, {
-                    onConflict: 'user_id'
-                  });
-                
-                await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                 await supabase
+                   .from('conversation_state')
+                   .upsert({
+                     user_id: userId,
+                     phone_number: phone_number.replace(/\D/g, ''),
+                     current_state: 're_sync_selection',
+                     waiting_for: 're_sync_selection',
+                     extracted_data: [{
+                       action: 'RE_SYNC_SYNC_UP_LIST_SHOWN',
+                       sync_up_list: syncUps,
+                       timestamp: new Date().toISOString()
+                     }]
+                   }, {
+                     onConflict: 'user_id'
+                   });
+                 
+                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
                  
                  return new Response(JSON.stringify({
                    success: true,
@@ -15171,78 +21212,198 @@ if (is_host === true) {
                    response: responseContent,
                    optimization: 'pattern_matching'
                  }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
-               }
-               
-               // Multiple sync ups - show selection list with time options
-               let syncUpList = 'Send new time options for which sync up?\n';
-               
-               // Fetch sync up options for each sync up and format the list
-               for (let index = 0; index < syncUps.length; index++) {
-                 const syncUp = syncUps[index];
-                 
-                 // Fetch sync up options for this sync up
-                 const { data: syncUpOptions } = await supabase
-                   .from('sync_up_options')
-                   .select('*')
-                   .eq('sync_up_id', syncUp.id)
-                   .neq('idx', 0) // Exclude global None option
-                   .order('idx', { ascending: true });
-                 
-                 // Format time options - show date and time for each option
-                 let timeOptionsText = '';
-                 if (syncUpOptions && syncUpOptions.length > 0) {
-                   const formattedOptions = syncUpOptions
-                     .map(opt => {
-                       const { dayMonth, timeText } = formatTimeRangeForOptionGlobal(opt.start_time, opt.end_time);
-                       // Format: "Thu 12/19, 6-8pm" or just date if no time
-                       return timeText ? `${dayMonth}, ${timeText}` : dayMonth;
-                     })
-                     .filter(opt => opt.length > 0);
-                   
-                   if (formattedOptions.length > 0) {
-                     // Join with " or " to match expected format: "Thu 12/19, 6-8pm or Sat 12/21, 10am-12pm"
-                     timeOptionsText = formattedOptions.join(' or ');
-                   }
-                 }
-                 
-                 // Build the list item
-                 if (timeOptionsText) {
-                   syncUpList += `${index + 1}. ${syncUp.name} - ${timeOptionsText}\n`;
-                 } else {
-                   // Fallback if no options found
-                   syncUpList += `${index + 1}. ${syncUp.name}\n`;
-                 }
-               }
-               
-               syncUpList += 'Reply with the sync up number or \'exit\'.';
-               
-               responseContent = syncUpList;
-               shouldSendSMS = true;
-               
-               await supabase
-                 .from('conversation_state')
-                 .upsert({
-                   user_id: userId,
-                   phone_number: phone_number.replace(/\D/g, ''),
-                   current_state: 're_sync_selection',
-                   waiting_for: 're_sync_selection',
-                   extracted_data: [{
-                     action: 'RE_SYNC_SYNC_UP_LIST_SHOWN',
-                     sync_up_list: syncUps,
-                     timestamp: new Date().toISOString()
-                   }]
-                 }, {
-                   onConflict: 'user_id'
+               } catch (error) {
+                 console.error('Error in RE_SYNC:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 're_sync',
+                   workflowStep: 'initiated',
+                   error: error instanceof Error ? error : new Error(String(error)),
+                   metadata: {}
                  });
-               
-               await sendSMS(phone_number, responseContent, send_sms, phone_number);
-               
-               return new Response(JSON.stringify({
-                 success: true,
-                 action: 'RE_SYNC',
-                 response: responseContent,
-                 optimization: 'pattern_matching'
-               }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+                 responseContent = 'Failed to process re-sync request. Please try again.';
+                 shouldSendSMS = true;
+                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                 return new Response(JSON.stringify({
+                   success: false,
+                   action: 'RE_SYNC',
+                   response: responseContent,
+                   error: String(error)
+                 }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+               }
+             }else if (action === 'RESET_CONFIRMATION_YES') {
+              console.log('RESET_CONFIRMATION_YES detected via pattern matching, executing full reset');
+              
+              try {
+                // Get current thread ID before deletion
+                const { data: stateData } = await supabase
+                  .from('conversation_state')
+                  .select('thread_id')
+                  .eq('user_id', userId)
+                  .single();
+                
+                const currentThreadId = stateData?.thread_id;
+                
+                // Delete OpenAI thread if it exists
+                if (currentThreadId) {
+                  try {
+                    const deleteResponse = await fetch(`https://api.openai.com/v1/threads/${currentThreadId}`, {
+                      method: 'DELETE',
+                      headers: {
+                        'Authorization': `Bearer ${Deno.env.get('OPENAI_API_KEY')}`,
+                        'OpenAI-Beta': 'assistants=v2'
+                      }
+                    });
+                    
+                    if (deleteResponse.ok) {
+                      console.log('OpenAI thread deleted successfully:', currentThreadId);
+                    } else {
+                      console.log('OpenAI thread deletion failed, continuing with reset:', await deleteResponse.text());
+                    }
+                  } catch (threadError) {
+                    console.error('Error deleting OpenAI thread, continuing with reset:', threadError);
+                  }
+                }
+                
+                // Create new OpenAI thread
+                const threadResponse = await fetch('https://api.openai.com/v1/threads', {
+                  method: 'POST',
+                  headers: {
+                    'Authorization': `Bearer ${Deno.env.get('OPENAI_API_KEY')}`,
+                    'Content-Type': 'application/json',
+                    'OpenAI-Beta': 'assistants=v2'
+                  },
+                  body: JSON.stringify({})
+                });
+
+                if (!threadResponse.ok) {
+                  const errorText = await threadResponse.text();
+                  console.error('Failed to create OpenAI thread:', errorText);
+                  throw new Error('Failed to create new thread');
+                }
+
+                const threadData = await threadResponse.json();
+                const newThreadId = threadData.id;
+                
+                // Reset conversation state with new thread
+                await supabase
+                  .from('conversation_state')
+                  .update({
+                    current_state: 'normal',
+                    waiting_for: null,
+                    extracted_data: [],
+                    thread_id: newThreadId,
+                    thread_created_at: new Date().toISOString(),
+                    last_action: 'RESET_COMMAND',
+                    last_action_timestamp: new Date().toISOString()
+                  })
+                  .eq('user_id', userId);
+                
+                responseContent = 'Reset complete. What would you like to do?';
+                shouldSendSMS = true;
+                
+                await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                
+                console.log('RESET: Complete reset executed for user:', userId, 'with new thread:', newThreadId);
+                
+                return new Response(JSON.stringify({
+                  success: true,
+                  action: 'RESET_CONFIRMATION_YES',
+                  response: responseContent,
+                  new_thread_id: newThreadId,
+                  optimization: 'pattern_matching'
+                }), {
+                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                });
+              } catch (error) {
+                console.error('Error in RESET_CONFIRMATION_YES:', error);
+                responseContent = 'Failed to reset conversation. Please try again.';
+                shouldSendSMS = true;
+                await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                
+                return new Response(JSON.stringify({
+                  success: true,
+                  action: 'RESET_CONFIRMATION_YES',
+                  response: responseContent,
+                  optimization: 'pattern_matching'
+                }), {
+                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                });
+              }
+            } else if (action === 'RESET_CONFIRMATION_NO') {
+              console.log('RESET_CONFIRMATION_NO detected via pattern matching, cancelling reset');
+              
+              try {
+                // Clear the reset confirmation state but keep other conversation state
+                await supabase
+                  .from('conversation_state')
+                  .update({
+                    waiting_for: null,
+                    current_state: 'normal'
+                  })
+                  .eq('user_id', userId);
+                
+                responseContent = 'Reset cancelled. You can continue with your current conversation.';
+                shouldSendSMS = true;
+                
+                await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                
+                return new Response(JSON.stringify({
+                  success: true,
+                  action: 'RESET_CONFIRMATION_NO',
+                  response: responseContent,
+                  optimization: 'pattern_matching'
+                }), {
+                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                });
+              } catch (error) {
+                console.error('Error in RESET_CONFIRMATION_NO:', error);
+                responseContent = 'Failed to cancel reset. Please try again.';
+                shouldSendSMS = true;
+                await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                
+                return new Response(JSON.stringify({
+                  success: true,
+                  action: 'RESET_CONFIRMATION_NO',
+                  response: responseContent,
+                  optimization: 'pattern_matching'
+                }), {
+                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                });
+              }
+            } else if (action === 'RESET_CONFIRMATION_INVALID') {
+              console.log('RESET_CONFIRMATION_INVALID detected via pattern matching');
+              
+              try {
+                responseContent = 'I didn\'t understand that. Please reply "yes" or "y" to confirm reset, or "no" or "n" to cancel.';
+                shouldSendSMS = true;
+                
+                await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                
+                return new Response(JSON.stringify({
+                  success: true,
+                  action: 'RESET_CONFIRMATION_INVALID',
+                  response: responseContent,
+                  optimization: 'pattern_matching'
+                }), {
+                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                });
+              } catch (error) {
+                console.error('Error in RESET_CONFIRMATION_INVALID:', error);
+                responseContent = 'Failed to process reset confirmation. Please try again.';
+                shouldSendSMS = true;
+                await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                
+                return new Response(JSON.stringify({
+                  success: true,
+                  action: 'RESET_CONFIRMATION_INVALID',
+                  response: responseContent,
+                  optimization: 'pattern_matching'
+                }), {
+                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                });
+               }
              } else if (action === 'SEND_MESSAGE') {
                console.log('SEND_MESSAGE detected via pattern matching');
                
@@ -15250,6 +21411,14 @@ if (is_host === true) {
                if (conversationState?.waiting_for === 'send_message_context') {
                  // Step 2: Handle context selection (user already initiated, now selecting context)
               if (extractedData.context === 'sync_up') {
+                logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'send_message',
+                  workflowStep: 'sync_up_context_selected',
+                  metadata: { context: 'sync_up' }
+                });
+                
                 // Sync up messaging - show recent sync ups by creator_id
                 const { data: syncUps, error: syncUpsError } = await supabase
                   .from('sync_ups')
@@ -15262,13 +21431,40 @@ if (is_host === true) {
                     crews(name)
                   `)
                   .eq('creator_id', userId)
+                  .eq('status', 'sent')
                   .order('created_at', { ascending: false })
                   .limit(10);
                  
                  if (syncUpsError || !syncUps || syncUps.length === 0) {
+                   if (syncUpsError) {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'send_message',
+                       workflowStep: 'sync_ups_fetch_failed',
+                       executionStatus: 'failure',
+                       metadata: { error: syncUpsError.message || 'Unknown error' }
+                     });
+                   } else {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'send_message',
+                       workflowStep: 'no_sync_ups_found',
+                       executionStatus: 'success'
+                     });
+                   }
                    responseContent = 'You don\'t have any sync ups yet. Create a sync up first to send messages.';
                    shouldSendSMS = true;
                  } else {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'sync_ups_list_shown',
+                     metadata: { sync_ups_count: syncUps.length }
+                   });
+                   
                    let syncUpList = 'Send message about which?\n\n';
                   syncUps.forEach((syncUp, index) => {
                     syncUpList += `${index + 1}. ${syncUp.name}\n`;
@@ -15305,18 +21501,53 @@ if (is_host === true) {
                      }, { onConflict: 'user_id' });
                  }
                } else if (extractedData.context === 'event') {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'event_context_selected',
+                     metadata: { context: 'event' }
+                   });
+                   
                    // Show event list
-                 const { data: events, error: eventsError } = await supabase
-                   .from('events')
-                   .select('id, title, event_date, start_time, location')
-                   .eq('creator_id', userId)
-                   .gte('event_date', new Date().toISOString().split('T')[0])
-                   .order('event_date', { ascending: true });
+                const { data: events, error: eventsError } = await supabase
+                  .from('events')
+                  .select('id, title, event_date, start_time, location')
+                  .eq('creator_id', userId)
+                  .eq('status', 'active')
+                  .gte('event_date', new Date().toISOString().split('T')[0])
+                  .order('event_date', { ascending: true });
                  
                  if (eventsError || !events || events.length === 0) {
+                   if (eventsError) {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'send_message',
+                       workflowStep: 'events_fetch_failed',
+                       executionStatus: 'failure',
+                       metadata: { error: eventsError.message || 'Unknown error' }
+                     });
+                   } else {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'send_message',
+                       workflowStep: 'no_events_found',
+                       executionStatus: 'success'
+                     });
+                   }
                    responseContent = 'You don\'t have any upcoming events. Create an event first to send messages.';
                    shouldSendSMS = true;
                  } else {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'events_list_shown',
+                     metadata: { events_count: events.length }
+                   });
+                   
                    let eventList = 'Send message about which?\n\n';
                    events.forEach((event, index) => {
                      eventList += `${index + 1}. ${event.title}\n`;
@@ -15346,6 +21577,15 @@ if (is_host === true) {
                      }, { onConflict: 'user_id' });
                  }
                  } else if (extractedData.invalid_input) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'invalid_context_input',
+                     executionStatus: 'failure',
+                     metadata: { invalid_input: message }
+                   });
+                   
                    responseContent = 'I didn\'t understand that. Message about: 1) Sync up 2) Event or type \'exit\' to cancel.';
                    shouldSendSMS = true;
                  }
@@ -15353,14 +21593,27 @@ if (is_host === true) {
                } else if (conversationState?.waiting_for === 'event_selection_send_message') {
                  // Step 3: Handle event selection
                  if (extractedData.event_index !== undefined) {
-                 const { data: events } = await supabase
-                   .from('events')
-                   .select('id, title, event_date, start_time, location')
-                   .eq('creator_id', userId)
-                   .gte('event_date', new Date().toISOString().split('T')[0])
-                   .order('event_date', { ascending: true });
+                const { data: events } = await supabase
+                  .from('events')
+                  .select('id, title, event_date, start_time, location')
+                  .eq('creator_id', userId)
+                  .eq('status', 'active')
+                  .gte('event_date', new Date().toISOString().split('T')[0])
+                  .order('event_date', { ascending: true });
                  
                  if (!events || extractedData.event_index < 0 || extractedData.event_index >= events.length) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'invalid_event_selection',
+                     executionStatus: 'failure',
+                     metadata: { 
+                       event_index: extractedData.event_index,
+                       available_events_count: events?.length || 0
+                     }
+                   });
+                   
                      // Provide contextual error message based on waiting_for state
                      if (conversationState?.waiting_for === 'event_selection_send_message') {
                        responseContent = 'I didn\'t understand that. Reply with an event number or \'exit\' to do something else.';
@@ -15371,12 +21624,33 @@ if (is_host === true) {
                  } else {
                    const selectedEvent = events[extractedData.event_index];
                    
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'event_selected',
+                     metadata: {
+                       event_id: selectedEvent.id,
+                       event_title: selectedEvent.title,
+                       event_index: extractedData.event_index
+                     }
+                   });
+                   
                    // Call helper function to get targeting options
                    const result = await sendMessageForEvent(supabase, selectedEvent.id, userId, phone_number, responseContent, shouldSendSMS);
                    responseContent = result.responseContent;
                    shouldSendSMS = result.shouldSendSMS;
                  }
                  } else if (extractedData.invalid_input) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'invalid_input',
+                     executionStatus: 'failure',
+                     metadata: { invalid_input: message }
+                   });
+                   
                    responseContent = 'Invalid input. Please try again or type "exit" to cancel.';
                    shouldSendSMS = true;
                  }
@@ -15396,14 +21670,49 @@ if (is_host === true) {
                    }
                    
                    if (!availableSyncUps || extractedData.sync_up_index < 0 || extractedData.sync_up_index >= availableSyncUps.length) {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'send_message',
+                       workflowStep: 'invalid_sync_up_selection',
+                       executionStatus: 'failure',
+                       metadata: {
+                         sync_up_index: extractedData.sync_up_index,
+                         available_sync_ups_count: availableSyncUps?.length || 0
+                       }
+                     });
+                     
                      responseContent = 'I didn\'t understand that. Reply with a sync up number or \'exit\' to do something else.';
                      shouldSendSMS = true;
                    } else {
                      const selectedSyncUp = availableSyncUps[extractedData.sync_up_index];
                      
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'send_message',
+                       workflowStep: 'sync_up_selected',
+                       metadata: {
+                         sync_up_id: selectedSyncUp.id,
+                         sync_up_name: selectedSyncUp.name,
+                         sync_up_index: extractedData.sync_up_index
+                       }
+                     });
+                     
                     // Show targeting options for sync up
                     responseContent = `Who should we message for "${selectedSyncUp.name}"?\n\n1. Everyone\n2. Non-responders\n\nReply with the number.`;
                      shouldSendSMS = true;
+                     
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'send_message',
+                       workflowStep: 'targeting_options_shown',
+                       metadata: {
+                         sync_up_id: selectedSyncUp.id,
+                         sync_up_name: selectedSyncUp.name
+                       }
+                     });
                      
                      // Update conversation state
                      await supabase
@@ -15426,6 +21735,15 @@ if (is_host === true) {
                        }, { onConflict: 'user_id' });
                    }
                  } else if (extractedData.invalid_input) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'invalid_input',
+                     executionStatus: 'failure',
+                     metadata: { invalid_input: message }
+                   });
+                   
                    responseContent = 'I didn\'t understand that. Reply with a number to select who to message or \'exit\' to cancel.';
                    shouldSendSMS = true;
                  }
@@ -15443,6 +21761,15 @@ if (is_host === true) {
                  
                  const targetingGroup = targetingMap[extractedData.targeting_index];
                  if (!targetingGroup) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'invalid_targeting_selection',
+                     executionStatus: 'failure',
+                     metadata: { targeting_index: extractedData.targeting_index }
+                   });
+                   
                    responseContent = 'I didn\'t understand that. Reply with a number to select who to message or \'exit\' to cancel.';
                    shouldSendSMS = true;
                  } else {
@@ -15454,9 +21781,23 @@ if (is_host === true) {
                      .single();
                    
                    let validInvitations = [];
-                   if (currentState?.extracted_data?.[0]?.available_invitations) {
-                     validInvitations = currentState.extracted_data[0].available_invitations;
+                   let eventId = null;
+                   if (currentState?.extracted_data?.[0]) {
+                     validInvitations = currentState.extracted_data[0].available_invitations || [];
+                     eventId = currentState.extracted_data[0].event_id || null;
                    }
+                   
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'targeting_group_selected',
+                     metadata: {
+                       targeting_group: targetingGroup,
+                       targeting_index: extractedData.targeting_index,
+                       event_id: eventId
+                     }
+                   });
                    
                    // Filter invitations based on targeting selection
                    let filteredInvitations = [];
@@ -15464,7 +21805,7 @@ if (is_host === true) {
                      filteredInvitations = validInvitations;
                    } else if (targetingGroup === 'non_responders') {
                      filteredInvitations = validInvitations.filter(inv => 
-                       inv.status === 'sent' || (inv.status === 'failed' && inv.response_note === 'no_response')
+                       !inv.response_note || inv.response_note === 'no_response' || inv.response_note === null
                      );
                    } else if (targetingGroup === 'coming') {
                      filteredInvitations = validInvitations.filter(inv => 
@@ -15481,6 +21822,18 @@ if (is_host === true) {
                    }
                    
                   if (filteredInvitations.length === 0) {
+                    logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'send_message',
+                      workflowStep: 'no_recipients_found',
+                      executionStatus: 'failure',
+                      metadata: {
+                        targeting_group: targetingGroup,
+                        event_id: eventId
+                      }
+                    });
+                    
                     // Friendly, group-specific empty-state messages
                     const emptyGroupMessageMap: Record<string, string> = {
                       everyone: "No one is invited yet! Type 'exit' or select a different group.",
@@ -15492,8 +21845,32 @@ if (is_host === true) {
                     responseContent = emptyGroupMessageMap[targetingGroup] || "No one found. Type 'exit' or select a different group.";
                     shouldSendSMS = true;
                   } else {
+                    logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'send_message',
+                      workflowStep: 'recipients_filtered',
+                      metadata: {
+                        targeting_group: targetingGroup,
+                        event_id: eventId,
+                        recipient_count: filteredInvitations.length
+                      }
+                    });
+                    
                     responseContent = `What message should we send? (160 characters max)`;
                     shouldSendSMS = true;
+                     
+                    logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'send_message',
+                      workflowStep: 'message_input_prompt_shown',
+                      metadata: {
+                        targeting_group: targetingGroup,
+                        event_id: eventId,
+                        recipient_count: filteredInvitations.length
+                      }
+                    });
                      
                      // Update conversation state
                      await supabase
@@ -15517,6 +21894,15 @@ if (is_host === true) {
                    }
                  }
                  } else if (extractedData.invalid_input) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'invalid_input',
+                     executionStatus: 'failure',
+                     metadata: { invalid_input: message }
+                   });
+                   
                    responseContent = 'Invalid input. Please try again or type "exit" to cancel.';
                    shouldSendSMS = true;
                  }
@@ -15531,6 +21917,15 @@ if (is_host === true) {
                    
                    const targetingGroup = targetingMap[extractedData.targeting_index];
                    if (!targetingGroup) {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'send_message',
+                       workflowStep: 'invalid_targeting_selection',
+                       executionStatus: 'failure',
+                       metadata: { targeting_index: extractedData.targeting_index }
+                     });
+                     
                      responseContent = 'I didn\'t understand that. Reply with a number to select who to message or \'exit\' to cancel.';
                      shouldSendSMS = true;
                    } else {
@@ -15550,10 +21945,46 @@ if (is_host === true) {
                        responseContent = 'Sync up not found. Please try again.';
                        shouldSendSMS = true;
                      } else {
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'send_message',
+                         workflowStep: 'targeting_group_selected',
+                         metadata: {
+                           targeting_group: targetingGroup,
+                           targeting_index: extractedData.targeting_index,
+                           sync_up_id: selectedSyncUp.id
+                         }
+                       });
+                       
                        // Build recipient list for sync up
                        const recipientList = await buildSyncUpRecipientList(supabase, selectedSyncUp.id, targetingGroup);
                        
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'send_message',
+                         workflowStep: 'recipient_list_built',
+                         metadata: {
+                           sync_up_id: selectedSyncUp.id,
+                           targeting_group: targetingGroup,
+                           recipient_count: recipientList.length
+                         }
+                       });
+                       
                 if (recipientList.length === 0) {
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'send_message',
+                    workflowStep: 'no_recipients_found',
+                    executionStatus: 'failure',
+                    metadata: {
+                      targeting_group: targetingGroup,
+                      sync_up_id: selectedSyncUp.id
+                    }
+                  });
+                  
                   if (targetingGroup === 'everyone') {
                     responseContent = `No contacts found for everyone. Please try a different targeting option.`;
                     shouldSendSMS = true;
@@ -15564,6 +21995,18 @@ if (is_host === true) {
                 } else {
                   responseContent = `What message should we send? (160 characters max)`;
                   shouldSendSMS = true;
+                  
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'send_message',
+                    workflowStep: 'message_input_prompt_shown',
+                    metadata: {
+                      targeting_group: targetingGroup,
+                      sync_up_id: selectedSyncUp.id,
+                      recipient_count: recipientList.length
+                    }
+                  });
                          
                          // Update conversation state
                          await supabase
@@ -15590,6 +22033,15 @@ if (is_host === true) {
                      }
                    }
                  } else if (extractedData.invalid_input) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'invalid_input',
+                     executionStatus: 'failure',
+                     metadata: { invalid_input: message }
+                   });
+                   
                    responseContent = 'I didn\'t understand that. Reply with a number to select who to message or \'exit\' to cancel.';
                    shouldSendSMS = true;
                  }
@@ -15600,9 +22052,29 @@ if (is_host === true) {
                  const messageText = extractedData.message_text.trim();
                  
                  if (messageText.length === 0) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'message_too_short',
+                     executionStatus: 'failure'
+                   });
+                   
                    responseContent = 'Please enter a message.';
                    shouldSendSMS = true;
                  } else if (messageText.length > 160) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'message_too_long',
+                     executionStatus: 'failure',
+                     metadata: {
+                       message_length: messageText.length,
+                       max_length: 160
+                     }
+                   });
+                   
                   responseContent = "Message too long. Please keep it under 160 characters or type 'exit' to cancel.";
                    shouldSendSMS = true;
                  } else {
@@ -15614,9 +22086,26 @@ if (is_host === true) {
                      .single();
                    
                   let filteredInvitations = [];
-                  if (currentState?.extracted_data?.[0]?.filtered_invitations) {
-                    filteredInvitations = currentState.extracted_data[0].filtered_invitations;
+                  let eventId = null;
+                  let targetingGroup = null;
+                  if (currentState?.extracted_data?.[0]) {
+                    filteredInvitations = currentState.extracted_data[0].filtered_invitations || [];
+                    eventId = currentState.extracted_data[0].event_id || null;
+                    targetingGroup = currentState.extracted_data[0].targeting_group || null;
                   }
+                  
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'send_message',
+                    workflowStep: 'message_text_received',
+                    metadata: {
+                      message_length: messageText.length,
+                      event_id: eventId,
+                      targeting_group: targetingGroup
+                    }
+                  });
+                  
                   // Derive a human-friendly targeting group label for events
                   let eventTargetingGroupLabel = 'your selected group';
                   const eventTargetingGroup = currentState?.extracted_data?.[0]?.targeting_group;
@@ -15633,6 +22122,19 @@ if (is_host === true) {
                   
                   responseContent = `'${messageText}' to ${eventTargetingGroupLabel} (${filteredInvitations.length} people)? Reply 'yes' to confirm.`;
                    shouldSendSMS = true;
+                   
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'confirmation_prompt_shown',
+                     metadata: {
+                       message_length: messageText.length,
+                       event_id: eventId,
+                       targeting_group: targetingGroup,
+                       recipient_count: filteredInvitations.length
+                     }
+                   });
                    
                    // Update conversation state
                    await supabase
@@ -15662,9 +22164,29 @@ if (is_host === true) {
                    const messageText = extractedData.message_text.trim();
                    
                    if (messageText.length === 0) {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'send_message',
+                       workflowStep: 'message_too_short',
+                       executionStatus: 'failure'
+                     });
+                     
                      responseContent = 'Please enter a message.';
                      shouldSendSMS = true;
                    } else if (messageText.length > 160) {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'send_message',
+                       workflowStep: 'message_too_long',
+                       executionStatus: 'failure',
+                       metadata: {
+                         message_length: messageText.length,
+                         max_length: 160
+                       }
+                     });
+                     
                     responseContent = "Message too long. Please keep it under 160 characters or type 'exit' to cancel.";
                      shouldSendSMS = true;
                    } else {
@@ -15677,12 +22199,25 @@ if (is_host === true) {
                      
                     let recipientList = [];
                     let targetingGroup = '';
-                     let selectedSyncUp = null;
-                     if (currentState?.extracted_data?.[0]) {
-                       recipientList = currentState.extracted_data[0].recipient_list || [];
-                       targetingGroup = currentState.extracted_data[0].targeting_group || '';
-                       selectedSyncUp = currentState.extracted_data[0].selected_sync_up || null;
-                     }
+                    let selectedSyncUp = null;
+                    if (currentState?.extracted_data?.[0]) {
+                      recipientList = currentState.extracted_data[0].recipient_list || [];
+                      targetingGroup = currentState.extracted_data[0].targeting_group || '';
+                      selectedSyncUp = currentState.extracted_data[0].selected_sync_up || null;
+                    }
+                    
+                    logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'send_message',
+                      workflowStep: 'message_text_received',
+                      metadata: {
+                        message_length: messageText.length,
+                        sync_up_id: selectedSyncUp?.id || null,
+                        targeting_group: targetingGroup
+                      }
+                    });
+                    
                     // Derive a human-friendly targeting group label for sync ups
                     const syncUpLabelMap: Record<string, string> = {
                       everyone: 'Everyone',
@@ -15692,6 +22227,19 @@ if (is_host === true) {
                     
                     responseContent = `'${messageText}' to ${targetingGroupLabel} (${recipientList.length} people)? Reply 'yes' to confirm.`;
                      shouldSendSMS = true;
+                     
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'send_message',
+                       workflowStep: 'confirmation_prompt_shown',
+                       metadata: {
+                         message_length: messageText.length,
+                         sync_up_id: selectedSyncUp?.id || null,
+                         targeting_group: targetingGroup,
+                         recipient_count: recipientList.length
+                       }
+                     });
                      
                      // Update conversation state
                      await supabase
@@ -15780,6 +22328,13 @@ if (is_host === true) {
               } else if (conversationState?.waiting_for === 'message_confirmation') {
                 // Step 6: Handle event message confirmation
                 if (extractedData.confirm === true) {
+                  logWorkflowStart({
+                    supabase,
+                    userId,
+                    workflowName: 'send_message',
+                    workflowStep: 'confirmation_received'
+                  });
+                  
                   const { data: currentState } = await supabase
                     .from('conversation_state')
                     .select('extracted_data')
@@ -15789,8 +22344,34 @@ if (is_host === true) {
                   const messageText = currentState?.extracted_data?.[0]?.message_text || '';
                   const filteredInvitations = currentState?.extracted_data?.[0]?.filtered_invitations || [];
                   const targetingGroupKey = currentState?.extracted_data?.[0]?.targeting_group || 'your selected group';
+                  const eventId = currentState?.extracted_data?.[0]?.event_id || null;
+
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'send_message',
+                    workflowStep: 'confirmation_yes',
+                    metadata: {
+                      event_id: eventId,
+                      targeting_group: targetingGroupKey,
+                      recipient_count: filteredInvitations.length,
+                      message_length: messageText.length
+                    }
+                  });
 
                   if (messageText && filteredInvitations.length > 0) {
+                    logWorkflowProgress({
+                      supabase,
+                      userId,
+                      workflowName: 'send_message',
+                      workflowStep: 'messages_sending_started',
+                      executionStatus: 'pending',
+                      metadata: {
+                        event_id: eventId,
+                        recipient_count: filteredInvitations.length
+                      }
+                    });
+                    
                     let successCount = 0;
                     let failureCount = 0;
 
@@ -15798,12 +22379,41 @@ if (is_host === true) {
                       const phone = inv?.contacts?.phone_number;
                       if (!phone) continue;
                       try {
-                        await sendSMS(phone, messageText, send_sms, phone_number);
+                        // Always send SMS to invitees (send_sms = true)
+                        await sendSMS(phone, messageText, true, phone_number);
                         successCount++;
                       } catch (error) {
                         console.error('Failed to send SMS to', phone, error);
                         failureCount++;
                       }
+                    }
+
+                    if (successCount > 0) {
+                      logWorkflowProgress({
+                        supabase,
+                        userId,
+                        workflowName: 'send_message',
+                        workflowStep: 'messages_sent',
+                        executionStatus: 'success',
+                        metadata: {
+                          event_id: eventId,
+                          success_count: successCount,
+                          failure_count: failureCount,
+                          total_recipients: filteredInvitations.length
+                        }
+                      });
+                    } else {
+                      logWorkflowProgress({
+                        supabase,
+                        userId,
+                        workflowName: 'send_message',
+                        workflowStep: 'messages_failed',
+                        executionStatus: 'failure',
+                        metadata: {
+                          event_id: eventId,
+                          error: 'All messages failed to send'
+                        }
+                      });
                     }
 
                     const labelMap: Record<string, string> = {
@@ -15815,21 +22425,60 @@ if (is_host === true) {
                       'your selected group': 'your selected group'
                     };
                     const targetLabel = labelMap[targetingGroupKey] || 'your selected group';
-                    responseContent = `Message sent to ${successCount} ${targetLabel}!`;
+                    
+                    // Use person/people format for the count
+                    if (successCount === 1) {
+                      responseContent = `Message sent to 1 person.`;
+                    } else {
+                      responseContent = `Message sent to ${successCount} people.`;
+                    }
                     if (failureCount > 0) {
                       responseContent += ` (${failureCount} failed)`;
                     }
                     shouldSendSMS = true;
 
-                    await supabase
-                      .from('conversation_state')
-                      .delete()
-                      .eq('user_id', userId);
+                    logWorkflowComplete({
+                      supabase,
+                      userId,
+                      workflowName: 'send_message',
+                      workflowStep: 'completed',
+                      metadata: {
+                        event_id: eventId,
+                        success_count: successCount,
+                        failure_count: failureCount
+                      }
+                    });
+
+                    // Reset host conversation state to idle
+                    await resetConversationState(supabase, userId, 'SEND_MESSAGE_COMPLETED');
                   } else {
                     responseContent = 'Message or recipients not found. Please try again.';
                     shouldSendSMS = true;
                   }
                 } else if (extractedData.confirm === false) {
+                  const { data: currentState } = await supabase
+                    .from('conversation_state')
+                    .select('extracted_data')
+                    .eq('user_id', userId)
+                    .single();
+                  
+                  const eventId = currentState?.extracted_data?.[0]?.event_id || null;
+                  
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'send_message',
+                    workflowStep: 'confirmation_no',
+                    metadata: { event_id: eventId }
+                  });
+                  
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'send_message',
+                    workflowStep: 'workflow_abandoned'
+                  });
+                  
                   responseContent = 'What would you like to do next?';
                   shouldSendSMS = true;
                   await supabase
@@ -15841,12 +22490,28 @@ if (is_host === true) {
                     })
                     .eq('user_id', userId);
                 } else if (extractedData.invalid_input) {
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'send_message',
+                    workflowStep: 'invalid_confirmation_input',
+                    executionStatus: 'failure',
+                    metadata: { invalid_input: message }
+                  });
+                  
                   responseContent = "I didn't understand that. Reply 'yes' to send message or 'exit' to cancel.";
                   shouldSendSMS = true;
                 }
               } else if (conversationState?.waiting_for === 'message_confirmation_sync_up') {
                  // Step 6: Handle sync up message confirmation
                  if (extractedData.confirm === true) {
+                   logWorkflowStart({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'confirmation_received'
+                   });
+                   
                    // Get current conversation state to access message and recipients
                    const { data: currentState } = await supabase
                      .from('conversation_state')
@@ -15866,14 +22531,40 @@ if (is_host === true) {
                      selectedSyncUp = currentState.extracted_data[0].selected_sync_up || null;
                    }
                    
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'confirmation_yes',
+                     metadata: {
+                       sync_up_id: selectedSyncUp?.id || null,
+                       targeting_group: targetingGroup,
+                       recipient_count: recipientList.length,
+                       message_length: messageText.length
+                     }
+                   });
+                   
                    if (messageText && recipientList.length > 0) {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'send_message',
+                       workflowStep: 'messages_sending_started',
+                       executionStatus: 'pending',
+                       metadata: {
+                         sync_up_id: selectedSyncUp?.id || null,
+                         recipient_count: recipientList.length
+                       }
+                     });
+                     
                      // Send messages to all recipients
                      let successCount = 0;
                      let failureCount = 0;
                      
                      for (const recipient of recipientList) {
                        try {
-                         await sendSMS(recipient.phone_number, messageText, send_sms, phone_number);
+                         // Always send SMS to invitees (send_sms = true)
+                         await sendSMS(recipient.phone_number, messageText, true, phone_number);
                          successCount++;
                        } catch (error) {
                          console.error(`Failed to send SMS to ${recipient.phone_number}:`, error);
@@ -15882,30 +22573,94 @@ if (is_host === true) {
                      }
                      
                     if (successCount > 0) {
+                      logWorkflowProgress({
+                        supabase,
+                        userId,
+                        workflowName: 'send_message',
+                        workflowStep: 'messages_sent',
+                        executionStatus: 'success',
+                        metadata: {
+                          sync_up_id: selectedSyncUp?.id || null,
+                          success_count: successCount,
+                          failure_count: failureCount,
+                          total_recipients: recipientList.length
+                        }
+                      });
+                      
                       const syncUpSuccessLabelMap: Record<string, string> = {
                         everyone: 'Everyone',
                         non_responders: 'Non-responders'
                       };
                       const successTargetLabel = syncUpSuccessLabelMap[targetingGroup] || 'your selected group';
-                      responseContent = `Message sent to ${successCount} ${successTargetLabel}!`;
+                      
+                      // Use person/people format for the count
+                      if (successCount === 1) {
+                        responseContent = `Message sent to 1 person.`;
+                      } else {
+                        responseContent = `Message sent to ${successCount} people.`;
+                      }
                        if (failureCount > 0) {
                          responseContent += ` (${failureCount} failed)`;
                        }
                      } else {
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'send_message',
+                         workflowStep: 'messages_failed',
+                         executionStatus: 'failure',
+                         metadata: {
+                           sync_up_id: selectedSyncUp?.id || null,
+                           error: 'All messages failed to send'
+                         }
+                       });
+                       
                        responseContent = 'Failed to send message. Please try again.';
                      }
                      shouldSendSMS = true;
                      
-                     // Clear conversation state
-                     await supabase
-                       .from('conversation_state')
-                       .delete()
-                       .eq('user_id', userId);
+                    logWorkflowComplete({
+                      supabase,
+                      userId,
+                      workflowName: 'send_message',
+                      workflowStep: 'completed',
+                      metadata: {
+                        sync_up_id: selectedSyncUp?.id || null,
+                        success_count: successCount,
+                        failure_count: failureCount
+                      }
+                    });
+                    
+                    // Reset host conversation state to idle
+                    await resetConversationState(supabase, userId, 'SEND_MESSAGE_COMPLETED');
                    } else {
                      responseContent = 'Message or recipients not found. Please try again.';
                      shouldSendSMS = true;
                    }
                  } else if (extractedData.confirm === false) {
+                   const { data: currentState } = await supabase
+                     .from('conversation_state')
+                     .select('extracted_data')
+                     .eq('user_id', userId)
+                     .single();
+                   
+                   const selectedSyncUp = currentState?.extracted_data?.[0]?.selected_sync_up || null;
+                   
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'confirmation_no',
+                     metadata: { sync_up_id: selectedSyncUp?.id || null }
+                   });
+                   
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'workflow_abandoned'
+                   });
+                   
                    responseContent = 'What would you like to do next?';
                    shouldSendSMS = true;
                    
@@ -15919,13 +22674,37 @@ if (is_host === true) {
                      })
                      .eq('user_id', userId);
                  } else if (extractedData.invalid_input) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_message',
+                     workflowStep: 'invalid_confirmation_input',
+                     executionStatus: 'failure',
+                     metadata: { invalid_input: message }
+                   });
+                   
                   responseContent = "I didn't understand that. Reply 'yes' to send message or 'exit' to cancel.";
                    shouldSendSMS = true;
                  }
                } else {
                  // Step 1: Initial SEND_MESSAGE command (no waiting_for state yet)
+                 logWorkflowStart({
+                   supabase,
+                   userId,
+                   workflowName: 'send_message',
+                   workflowStep: 'initiated'
+                 });
+                 
                  responseContent = 'Message about:\n1. Sync up\n2. Event\n\nReply with the number.';
                  shouldSendSMS = true;
+                 
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 'send_message',
+                   workflowStep: 'context_menu_shown',
+                   executionStatus: 'success'
+                 });
                  
                  // Update conversation state with available events
                  const { error: upsertError } = await supabase
@@ -16069,22 +22848,23 @@ if (is_host === true) {
                        .filter(member => member.contacts && !invitedContactIds.has(member.contacts.id))
                        .map(member => member.contacts);
                      
-                     if (uninvitedMembers.length === 0) {
-                       responseContent = 'No uninvited members found.';
-                       shouldSendSMS = true;
-                     } else {
-                       // Create invitations for uninvited members
-                       const invitations = uninvitedMembers.map(member => ({
-                         event_id: eventId,
-                         contact_id: member.id,
-                         invited_by: userId,
-                         status: 'pending',
-                         sms_sent_at: new Date().toISOString()
-                       }));
-                       
-                       const { error: insertError } = await supabase
-                         .from('invitations')
-                         .insert(invitations);
+                    if (uninvitedMembers.length === 0) {
+                      responseContent = 'No uninvited members found.';
+                      shouldSendSMS = true;
+                    } else {
+                      // Create invitations for uninvited members
+                      const invitations = uninvitedMembers.map(member => ({
+                        event_id: eventId,
+                        contact_id: member.id,
+                        invitee_contact_id: member.id,
+                        invited_by: userId,
+                        status: 'pending',
+                        sms_sent_at: new Date().toISOString()
+                      }));
+                      
+                      const { error: insertError } = await supabase
+                        .from('invitations')
+                        .insert(invitations);
                        
                        if (insertError) {
                          console.error('Error creating invitations:', insertError);
@@ -16105,7 +22885,7 @@ if (is_host === true) {
                         const { shorten_event_url } = await fetchEventWithShortUrl(supabase, eventId);
                         const eventLink = formatEventLink(eventId, shorten_event_url);
 
-                        responseContent = `${uninvitedMembers.length} invites sent for ${eventTitle}${eventDateFormatted ? ` on ${eventDateFormatted}` : ''}${eventTimeFormatted ? ` at ${eventTimeFormatted}` : ''}. Check RSVPs: ${eventLink}`;
+                        responseContent = `${uninvitedMembers.length} invites sent for ${eventTitle}${eventDateFormatted ? ` on ${eventDateFormatted}` : ''}${eventTimeFormatted ? ` at ${eventTimeFormatted}` : ''}. Type "RSVPs" to check responses.`;
                    shouldSendSMS = true;
                    
                    // Clear conversation state
@@ -16339,6 +23119,14 @@ if (is_host === true) {
             } else if (action === 'SEND_INVITES_AFTER_ADDING') {
                console.log('SEND_INVITES_AFTER_ADDING detected via pattern matching, bypassing AI');
                
+               // Log workflow start
+               logWorkflowStart({
+                 supabase,
+                 userId,
+                 workflowName: 'send_invitations',
+                 workflowStep: 'send_invites_after_adding_initiated'
+               });
+               
                try {
                  // Get conversation state to find event and crew info
                  const { data: conversationStateData } = await supabase
@@ -16369,6 +23157,15 @@ if (is_host === true) {
 
                  // If we have eventId but no crewId, look up the crew info from the event
                  if (eventId && !crewId) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'event_crew_lookup',
+                     executionStatus: 'pending',
+                     metadata: { event_id: eventId }
+                   });
+                   
                    const { data: eventData } = await supabase
                      .from('events')
                      .select(`
@@ -16388,6 +23185,13 @@ if (is_host === true) {
                  console.log('Final event/crew info:', { eventId, crewId, crewName });
                  
                  if (!eventId || !crewId) {
+                   logWorkflowError({
+                     supabase,
+                     userId,
+                     workflowName: 'send_invitations',
+                     workflowStep: 'event_crew_lookup_failed',
+                     errorDetails: { event_id: eventId, crew_id: crewId }
+                   });
                    responseContent = 'No event or crew found. Please try again.';
                    shouldSendSMS = true;
                    console.log('Missing event or crew info');
@@ -16430,17 +23234,47 @@ if (is_host === true) {
                        .map(member => member.contacts);
                      
                      if (uninvitedMembers.length === 0) {
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'send_invitations',
+                         workflowStep: 'no_uninvited_members',
+                         executionStatus: 'success',
+                         crewId: crewId,
+                         metadata: { event_id: eventId }
+                       });
                        responseContent = 'No new members to invite.';
                    shouldSendSMS = true;
                  } else {
-                       // Create invitations for uninvited members
-                       const invitations = uninvitedMembers.map(member => ({
-                         event_id: eventId,
-                         contact_id: member.id,
-                         invited_by: userId,
-                         status: 'pending',
-                         sms_sent_at: new Date().toISOString()
-                       }));
+                       logWorkflowProgress({
+                         supabase,
+                         userId,
+                         workflowName: 'send_invitations',
+                         workflowStep: 'uninvited_members_found',
+                         executionStatus: 'success',
+                         crewId: crewId,
+                         metadata: { event_id: eventId, uninvited_count: uninvitedMembers.length }
+                       });
+                       
+                      // Create invitations for uninvited members
+                      const invitations = uninvitedMembers.map(member => ({
+                        event_id: eventId,
+                        contact_id: member.id,
+                        invitee_contact_id: member.id,
+                        invited_by: userId,
+                        status: 'pending',
+                        sms_sent_at: new Date().toISOString()
+                      }));
+                      
+                      logWorkflowProgress({
+                        supabase,
+                        userId,
+                        workflowName: 'send_invitations',
+                        workflowStep: 'invitations_created',
+                        executionStatus: 'success',
+                        crewId: crewId,
+                        metadata: { event_id: eventId, invitation_count: invitations.length }
+                      });
                        
                        const { error: insertError } = await supabase
                          .from('invitations')
@@ -16448,9 +23282,27 @@ if (is_host === true) {
                        
                        if (insertError) {
                          console.error('Error creating invitations:', insertError);
+                         logWorkflowError({
+                           supabase,
+                           userId,
+                           workflowName: 'send_invitations',
+                           workflowStep: 'invitations_creation_failed',
+                           crewId: crewId,
+                           errorDetails: { event_id: eventId, error: insertError }
+                         });
                          responseContent = 'Failed to send invitations. Please try again.';
                          shouldSendSMS = true;
                        } else {
+                         logWorkflowProgress({
+                           supabase,
+                           userId,
+                           workflowName: 'send_invitations',
+                           workflowStep: 'invitations_sent_after_adding',
+                           executionStatus: 'success',
+                           crewId: crewId,
+                           metadata: { event_id: eventId, invitation_count: uninvitedMembers.length }
+                         });
+                         
                          const eventDate = new Date(eventData.event_date).toLocaleDateString();
                          const eventTime = eventData.start_time ? new Date(`2000-01-01T${eventData.start_time}`).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : '';
                          
@@ -16458,7 +23310,7 @@ if (is_host === true) {
                          const { shorten_event_url } = await fetchEventWithShortUrl(supabase, eventId);
                          const eventLink = formatEventLink(eventId, shorten_event_url);
                          
-                         responseContent = `${uninvitedMembers.length} invites sent for ${eventData.title} on ${eventDate}${eventTime ? ` at ${eventTime}` : ''}. Check RSVPs: ${eventLink}`;
+                         responseContent = `${uninvitedMembers.length} invites sent for ${eventData.title} on ${eventDate}${eventTime ? ` at ${eventTime}` : ''}. Type "RSVPs" to check responses.`;
                    shouldSendSMS = true;
                    
                          // Clear conversation state
@@ -16472,6 +23324,16 @@ if (is_host === true) {
                              last_action_timestamp: null
                            })
                            .eq('user_id', userId);
+                         
+                         logWorkflowComplete({
+                           supabase,
+                           userId,
+                           workflowName: 'send_invitations',
+                           workflowStep: 'send_invites_after_adding_completed',
+                           executionStatus: 'success',
+                           crewId: crewId,
+                           outputData: { event_id: eventId, invitation_count: uninvitedMembers.length }
+                         });
                        }
                      }
                  }
@@ -16489,6 +23351,13 @@ if (is_host === true) {
                  });
                } catch (error) {
                  console.error('Error in SEND_INVITES_AFTER_ADDING pattern matching:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'send_invitations',
+                   workflowStep: 'send_invites_after_adding_error',
+                   errorDetails: { error: error.message || String(error) }
+                 });
                  responseContent = 'Failed to send invitations. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -16496,8 +23365,8 @@ if (is_host === true) {
                  return new Response(JSON.stringify({
                    success: true,
                    action: 'SEND_INVITES_AFTER_ADDING',
-                   response: responseContent,
-                   optimization: 'pattern_matching'
+                 response: responseContent,
+                 optimization: 'pattern_matching'
                  }), {
                    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
                  });
@@ -16563,64 +23432,225 @@ Reply with a command or contact support@funlet.ai with any questions.`;
              } else if (action === 'CHECK_SYNC_STATUS') {
                console.log('CHECK_SYNC_STATUS detected via pattern matching');
                
-               // This action is HOST ONLY - verify is_host=true
-               if (!is_host) {
-                 console.log('Non-host attempted to check sync status');
-                 return new Response(JSON.stringify({
-                   success: false,
-                   error: 'This feature is only available for hosts'
-                 }), { 
-                   status: 403,
-                   headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+               try {
+                 logWorkflowStart({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up_status',
+                   workflowStep: 'initiated',
+                   metadata: {}
                  });
-               }
-               
-               const eventName = extractedData.event_name;
-               
-               // Query user's active sync ups (created by this host)
-               const { data: syncUps, error: syncUpsError } = await supabase
-                 .from('sync_ups')
-                 .select(`
-                   id,
-                   event_id,
-                   crew_id,
-                   created_at,
-                   events!inner (id, title, location, creator_id),
-                   crews (id, name),
-                   sync_up_options (id, idx, start_time, end_time, option_text)
-                 `)
-                 .eq('events.creator_id', userId)
-                 .order('created_at', { ascending: false });
-               
-               if (syncUpsError || !syncUps || syncUps.length === 0) {
-                 responseContent = 'No active sync ups found. Type \'Sync Up\' to create one or \'exit\' to do something else.';
-                 shouldSendSMS = true;
-                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                 return new Response(JSON.stringify({
-                   success: true,
-                   action: 'CHECK_SYNC_STATUS',
-                   response: responseContent,
-                   optimization: 'pattern_matching'
-                 }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
-               }
-               
-               // If event name provided, try to find matching sync up
-               let selectedSyncUp = null;
-               if (eventName) {
-                 selectedSyncUp = syncUps.find(su => 
-                   su.events.title.toLowerCase().includes(eventName.toLowerCase())
-                 );
                  
-                 if (!selectedSyncUp) {
-                   // Event name not recognized, show selection
-                   responseContent = `Event "${eventName}" not found. Check status for which sync up?\n\n`;
+                 // This action is HOST ONLY - verify is_host=true
+                 if (!is_host) {
+                   console.log('Non-host attempted to check sync status');
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up_status',
+                     workflowStep: 'non_host_attempted',
+                     executionStatus: 'failure',
+                     metadata: {}
+                   });
+                   return new Response(JSON.stringify({
+                     success: false,
+                     error: 'This feature is only available for hosts'
+                   }), { 
+                     status: 403,
+                     headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                   });
+                 }
+                 
+                 const eventName = extractedData.event_name;
+                 
+                 if (eventName) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up_status',
+                     workflowStep: 'event_name_specified',
+                     executionStatus: 'success',
+                     metadata: { event_name: eventName }
+                   });
+                 }
+                 
+                 // Query user's active sync ups (created by this host, upcoming events only)
+                 // First get upcoming event IDs
+                 const { data: upcomingEvents } = await supabase
+                   .from('events')
+                   .select('id, event_date')
+                   .eq('creator_id', userId)
+                   .gte('event_date', new Date().toISOString().split('T')[0])
+                   .order('event_date', { ascending: true });
+                 
+                 const upcomingEventIds = upcomingEvents?.map(e => e.id) || [];
+                 
+                 if (upcomingEventIds.length === 0) {
+                   // No upcoming events, so no sync-ups to show
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up_status',
+                     workflowStep: 'no_upcoming_events',
+                     executionStatus: 'success',
+                     metadata: {}
+                   });
+                   responseContent = 'No active sync ups found. Type \'Sync Up\' to create one or \'exit\' to do something else.';
+                   shouldSendSMS = true;
+                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                   return new Response(JSON.stringify({
+                     success: true,
+                     action: 'CHECK_SYNC_STATUS',
+                     response: responseContent,
+                     optimization: 'pattern_matching'
+                   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+                 }
+                 
+                 const { data: syncUps, error: syncUpsError } = await supabase
+                   .from('sync_ups')
+                   .select(`
+                     id,
+                     event_id,
+                     crew_id,
+                     created_at,
+                     events!inner (id, title, location, creator_id, event_date),
+                     crews (id, name),
+                     sync_up_options (id, idx, start_time, end_time, option_text)
+                   `)
+                   .in('event_id', upcomingEventIds);
+                 
+                 // Sort by event_date in memory
+                 if (syncUps) {
+                   syncUps.sort((a, b) => {
+                     const aDate = a.events?.event_date || '';
+                     const bDate = b.events?.event_date || '';
+                     return aDate.localeCompare(bDate);
+                   });
+                 }
+                 
+                 if (syncUpsError) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up_status',
+                     workflowStep: 'sync_ups_fetch_failed',
+                     executionStatus: 'failure',
+                     metadata: { error: syncUpsError?.message || String(syncUpsError) }
+                   });
+                 }
+                 
+                 if (syncUpsError || !syncUps || syncUps.length === 0) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up_status',
+                     workflowStep: 'no_sync_ups_found',
+                     executionStatus: 'success',
+                     metadata: {}
+                   });
+                   responseContent = 'No active sync ups found. Type \'Sync Up\' to create one or \'exit\' to do something else.';
+                   shouldSendSMS = true;
+                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                   return new Response(JSON.stringify({
+                     success: true,
+                     action: 'CHECK_SYNC_STATUS',
+                     response: responseContent,
+                     optimization: 'pattern_matching'
+                   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+                 }
+                 
+                 // If event name provided, try to find matching sync up
+                 let selectedSyncUp = null;
+                 if (eventName) {
+                   selectedSyncUp = syncUps.find(su => 
+                     su.events.title.toLowerCase().includes(eventName.toLowerCase())
+                   );
+                   
+                   if (!selectedSyncUp) {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'sync_up_status',
+                       workflowStep: 'sync_up_not_found_by_name',
+                       executionStatus: 'success',
+                       metadata: { requested_event_name: eventName }
+                     });
+                     // Event name not recognized, show selection
+                     responseContent = `Event "${eventName}" not found. Check status for which sync up?\n\n`;
+                     syncUps.forEach((su, idx) => {
+                       const timeOptions = formatTimeOptions(su.sync_up_options);
+                       responseContent += `${idx + 1}. ${su.events.title}${timeOptions}\n`;
+                     });
+                     responseContent += `\nReply with the sync up number or 'exit'.`;
+                     
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'sync_up_status',
+                       workflowStep: 'multiple_sync_ups_list_shown',
+                       executionStatus: 'success',
+                       metadata: { sync_ups_count: syncUps.length }
+                     });
+                     
+                     // Update conversation state to wait for selection
+                     await supabase
+                       .from('conversation_state')
+                       .upsert({
+                         user_id: userId,
+                         phone_number: phone_number.replace(/\D/g, ''),
+                         waiting_for: 'sync_status_selection',
+                         extracted_data: syncUps.map(su => ({ sync_up_id: su.id }))
+                       }, {
+                         onConflict: 'user_id'
+                       });
+                     
+                     shouldSendSMS = true;
+                     await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                     return new Response(JSON.stringify({
+                       success: true,
+                       action: 'CHECK_SYNC_STATUS_SELECT',
+                       response: responseContent,
+                       optimization: 'pattern_matching'
+                     }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+                   } else {
+                     logWorkflowProgress({
+                       supabase,
+                       userId,
+                       workflowName: 'sync_up_status',
+                       workflowStep: 'sync_up_found_by_name',
+                       executionStatus: 'success',
+                       metadata: { sync_up_id: selectedSyncUp.id, sync_up_name: selectedSyncUp.events.title }
+                     });
+                   }
+                 } else if (syncUps.length === 1) {
+                   // Only one sync up, use it
+                   selectedSyncUp = syncUps[0];
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up_status',
+                     workflowStep: 'single_sync_up_auto_selected',
+                     executionStatus: 'success',
+                     metadata: { sync_up_id: selectedSyncUp.id, sync_up_name: selectedSyncUp.events.title }
+                   });
+                 } else {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up_status',
+                     workflowStep: 'multiple_sync_ups_list_shown',
+                     executionStatus: 'success',
+                     metadata: { sync_ups_count: syncUps.length }
+                   });
+                   // Multiple sync ups, show selection
+                   responseContent = `Check status for which sync up?\n\n`;
                    syncUps.forEach((su, idx) => {
                      const timeOptions = formatTimeOptions(su.sync_up_options);
                      responseContent += `${idx + 1}. ${su.events.title}${timeOptions}\n`;
                    });
                    responseContent += `\nReply with the sync up number or 'exit'.`;
                    
-                   // Update conversation state to wait for selection
+                   // Update conversation state
                    await supabase
                      .from('conversation_state')
                      .upsert({
@@ -16641,141 +23671,217 @@ Reply with a command or contact support@funlet.ai with any questions.`;
                      optimization: 'pattern_matching'
                    }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
                  }
-               } else if (syncUps.length === 1) {
-                 // Only one sync up, use it
-                 selectedSyncUp = syncUps[0];
-               } else {
-                 // Multiple sync ups, show selection
-                 responseContent = `Check status for which sync up?\n\n`;
-                 syncUps.forEach((su, idx) => {
-                   const timeOptions = formatTimeOptions(su.sync_up_options);
-                   responseContent += `${idx + 1}. ${su.events.title}${timeOptions}\n`;
-                 });
-                 responseContent += `\nReply with the sync up number or 'exit'.`;
                  
-                 // Update conversation state
+                 // Display status for selected sync up
+                 responseContent = await formatSyncUpStatus(supabase, selectedSyncUp);
+                 shouldSendSMS = true;
+                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                 
+                 const optionsCount = selectedSyncUp.sync_up_options?.length || 0;
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up_status',
+                   workflowStep: 'status_displayed',
+                   executionStatus: 'success',
+                   metadata: { 
+                     sync_up_id: selectedSyncUp.id, 
+                     sync_up_name: selectedSyncUp.events.title,
+                     options_count: optionsCount
+                   }
+                 });
+                 
+                 // Set conversation state for option selection instead of clearing
                  await supabase
                    .from('conversation_state')
                    .upsert({
                      user_id: userId,
                      phone_number: phone_number.replace(/\D/g, ''),
-                     waiting_for: 'sync_status_selection',
-                     extracted_data: syncUps.map(su => ({ sync_up_id: su.id }))
+                     waiting_for: 'sync_status_option_selection',
+                     current_state: 'sync_status_awaiting_action',
+                     extracted_data: [{
+                       action: 'SYNC_STATUS_DISPLAYED',
+                       sync_up_id: selectedSyncUp.id,
+                       event_id: selectedSyncUp.event_id,
+                       crew_id: selectedSyncUp.crew_id,
+                       sync_up_name: selectedSyncUp.events.title,
+                       location: selectedSyncUp.events.location,
+                       crew_name: selectedSyncUp.crews.name,
+                       timestamp: new Date().toISOString()
+                     }]
                    }, {
                      onConflict: 'user_id'
                    });
                  
+                 logWorkflowComplete({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up_status',
+                   workflowStep: 'completed',
+                   executionStatus: 'success',
+                   metadata: { 
+                     sync_up_id: selectedSyncUp.id, 
+                     sync_up_name: selectedSyncUp.events.title
+                   }
+                 });
+                 
+                 return new Response(JSON.stringify({
+                   success: true,
+                   action: 'CHECK_SYNC_STATUS_DISPLAYED',
+                   response: responseContent,
+                   optimization: 'pattern_matching'
+                 }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+               } catch (error) {
+                 console.error('Error in CHECK_SYNC_STATUS:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up_status',
+                   workflowStep: 'initiated',
+                   metadata: { error: error?.message || String(error) }
+                 });
+                 responseContent = 'Failed to check sync status. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
                  return new Response(JSON.stringify({
                    success: true,
-                   action: 'CHECK_SYNC_STATUS_SELECT',
+                   action: 'CHECK_SYNC_STATUS',
                    response: responseContent,
                    optimization: 'pattern_matching'
                  }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
                }
-               
-               // Display status for selected sync up
-               responseContent = await formatSyncUpStatus(supabase, selectedSyncUp);
-               shouldSendSMS = true;
-               await sendSMS(phone_number, responseContent, send_sms, phone_number);
-               
-               // Set conversation state for option selection instead of clearing
-               await supabase
-                 .from('conversation_state')
-                 .upsert({
-                   user_id: userId,
-                   phone_number: phone_number.replace(/\D/g, ''),
-                   waiting_for: 'sync_status_option_selection',
-                   current_state: 'sync_status_awaiting_action',
-                   extracted_data: [{
-                     action: 'SYNC_STATUS_DISPLAYED',
-                     sync_up_id: selectedSyncUp.id,
-                     event_id: selectedSyncUp.event_id,
-                     crew_id: selectedSyncUp.crew_id,
-                     sync_up_name: selectedSyncUp.events.title,
-                     location: selectedSyncUp.events.location,
-                     crew_name: selectedSyncUp.crews.name,
-                     timestamp: new Date().toISOString()
-                   }]
-                 }, {
-                   onConflict: 'user_id'
-                 });
-               
-               return new Response(JSON.stringify({
-                 success: true,
-                 action: 'CHECK_SYNC_STATUS_DISPLAYED',
-                 response: responseContent,
-                 optimization: 'pattern_matching'
-               }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
              } else if (action === 'SYNC_STATUS_SELECTION') {
                console.log('SYNC_STATUS_SELECTION detected via pattern matching');
                
-               const selectionNumber = extractedData.selection_number;
-               const syncUpsData = conversationState?.extracted_data || [];
-               
-               if (selectionNumber < 1 || selectionNumber > syncUpsData.length) {
-                 responseContent = `I didn't understand that. Reply with a sync up number or 'exit' to do something else.`;
+               try {
+                 const selectionNumber = extractedData.selection_number;
+                 const syncUpsData = conversationState?.extracted_data || [];
+                 
+                 if (selectionNumber < 1 || selectionNumber > syncUpsData.length) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up_status',
+                     workflowStep: 'invalid_sync_up_selection',
+                     executionStatus: 'failure',
+                     metadata: { selection_number: selectionNumber, available_count: syncUpsData.length }
+                   });
+                   responseContent = `I didn't understand that. Reply with a sync up number or 'exit' to do something else.`;
+                   shouldSendSMS = true;
+                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                   return new Response(JSON.stringify({
+                     success: true,
+                     action: 'SYNC_STATUS_SELECTION_ERROR',
+                     response: responseContent,
+                     optimization: 'pattern_matching'
+                   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+                 }
+                 
+                 const selectedSyncUpId = syncUpsData[selectionNumber - 1].sync_up_id;
+                 
+                // Fetch full sync up data
+                const { data: syncUp } = await supabase
+                  .from('sync_ups')
+                  .select(`
+                    id,
+                    event_id,
+                    crew_id,
+                    events (id, title, location),
+                    crews (id, name),
+                    sync_up_options (id, idx, start_time, end_time, option_text)
+                  `)
+                  .eq('id', selectedSyncUpId)
+                  .single();
+                 
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up_status',
+                   workflowStep: 'sync_up_selected',
+                   executionStatus: 'success',
+                   metadata: { 
+                     sync_up_id: syncUp.id, 
+                     sync_up_name: syncUp.events.title,
+                     selection_number: selectionNumber
+                   }
+                 });
+                 
+                 responseContent = await formatSyncUpStatus(supabase, syncUp);
+                 shouldSendSMS = true;
+                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                 
+                 const optionsCount = syncUp.sync_up_options?.length || 0;
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up_status',
+                   workflowStep: 'status_displayed',
+                   executionStatus: 'success',
+                   metadata: { 
+                     sync_up_id: syncUp.id, 
+                     sync_up_name: syncUp.events.title,
+                     options_count: optionsCount
+                   }
+                 });
+                 
+                 // Set conversation state for option selection instead of clearing
+                 await supabase
+                   .from('conversation_state')
+                   .upsert({
+                     user_id: userId,
+                     phone_number: phone_number.replace(/\D/g, ''),
+                     waiting_for: 'sync_status_option_selection',
+                     current_state: 'sync_status_awaiting_action',
+                     extracted_data: [{
+                       action: 'SYNC_STATUS_DISPLAYED',
+                       sync_up_id: syncUp.id,
+                       event_id: syncUp.event_id,
+                       crew_id: syncUp.crew_id,
+                       sync_up_name: syncUp.events.title,
+                       location: syncUp.events.location,
+                       crew_name: syncUp.crews.name,
+                       timestamp: new Date().toISOString()
+                     }]
+                   }, {
+                     onConflict: 'user_id'
+                   });
+                 
+                 return new Response(JSON.stringify({
+                   success: true,
+                   action: 'SYNC_STATUS_DISPLAYED',
+                   response: responseContent,
+                   optimization: 'pattern_matching'
+                 }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+               } catch (error) {
+                 console.error('Error in SYNC_STATUS_SELECTION:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up_status',
+                   workflowStep: 'sync_up_selected',
+                   metadata: { error: error?.message || String(error) }
+                 });
+                 responseContent = 'Failed to select sync up. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
                  return new Response(JSON.stringify({
                    success: true,
-                   action: 'SYNC_STATUS_SELECTION_ERROR',
+                   action: 'SYNC_STATUS_SELECTION',
                    response: responseContent,
                    optimization: 'pattern_matching'
                  }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
                }
-               
-               const selectedSyncUpId = syncUpsData[selectionNumber - 1].sync_up_id;
-               
-              // Fetch full sync up data
-              const { data: syncUp } = await supabase
-                .from('sync_ups')
-                .select(`
-                  id,
-                  event_id,
-                  crew_id,
-                  events (id, title, location),
-                  crews (id, name),
-                  sync_up_options (id, idx, start_time, end_time, option_text)
-                `)
-                .eq('id', selectedSyncUpId)
-                .single();
-               
-               responseContent = await formatSyncUpStatus(supabase, syncUp);
-               shouldSendSMS = true;
-               await sendSMS(phone_number, responseContent, send_sms, phone_number);
-               
-               // Set conversation state for option selection instead of clearing
-               await supabase
-                 .from('conversation_state')
-                 .upsert({
-                   user_id: userId,
-                   phone_number: phone_number.replace(/\D/g, ''),
-                   waiting_for: 'sync_status_option_selection',
-                   current_state: 'sync_status_awaiting_action',
-                   extracted_data: [{
-                     action: 'SYNC_STATUS_DISPLAYED',
-                     sync_up_id: syncUp.id,
-                     event_id: syncUp.event_id,
-                     crew_id: syncUp.crew_id,
-                     sync_up_name: syncUp.events.title,
-                     location: syncUp.events.location,
-                     crew_name: syncUp.crews.name,
-                     timestamp: new Date().toISOString()
-                   }]
-                 }, {
-                   onConflict: 'user_id'
-                 });
-               
-               return new Response(JSON.stringify({
-                 success: true,
-                 action: 'SYNC_STATUS_DISPLAYED',
-                 response: responseContent,
-                 optimization: 'pattern_matching'
-               }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
              } else if (action === 'SYNC_STATUS_SELECTION_ERROR') {
                console.log('SYNC_STATUS_SELECTION_ERROR detected via pattern matching');
+               
+               logWorkflowProgress({
+                 supabase,
+                 userId,
+                 workflowName: 'sync_up_status',
+                 workflowStep: 'invalid_selection_input',
+                 executionStatus: 'failure',
+                 metadata: { invalid_input: message }
+               });
                
                responseContent = `I didn't understand that. Reply with a sync up number or 'exit' to do something else.`;
                shouldSendSMS = true;
@@ -16790,203 +23896,332 @@ Reply with a command or contact support@funlet.ai with any questions.`;
              } else if (action === 'SYNC_STATUS_OPTION_SELECTED') {
                console.log('SYNC_STATUS_OPTION_SELECTED detected');
                
-               const optionNumber = extractedData.option_number;
-               
-               // Get sync up data from conversation state
-               let syncStatusData = null;
-               if (conversationState?.extracted_data && Array.isArray(conversationState.extracted_data)) {
-                 for (let i = conversationState.extracted_data.length - 1; i >= 0; i--) {
-                   const item = conversationState.extracted_data[i];
-                   if (item.action === 'SYNC_STATUS_DISPLAYED') {
-                     syncStatusData = item;
-                     break;
+               try {
+                 const optionNumber = extractedData.option_number;
+                 
+                 // Get sync up data from conversation state
+                 let syncStatusData = null;
+                 if (conversationState?.extracted_data && Array.isArray(conversationState.extracted_data)) {
+                   for (let i = conversationState.extracted_data.length - 1; i >= 0; i--) {
+                     const item = conversationState.extracted_data[i];
+                     if (item.action === 'SYNC_STATUS_DISPLAYED') {
+                       syncStatusData = item;
+                       break;
+                     }
                    }
                  }
-               }
-               
-               if (!syncStatusData) {
-                 responseContent = 'Sync up data not found. Please start over.';
-                 shouldSendSMS = true;
-                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                 return new Response(JSON.stringify({
-                   success: true,
-                   action: 'SYNC_STATUS_OPTION_ERROR',
-                   response: responseContent,
-                   optimization: 'pattern_matching'
-                 }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
-               }
-               
-               // Fetch the selected sync up option
-               const { data: options } = await supabase
-                 .from('sync_up_options')
-                 .select('*')
-                 .eq('sync_up_id', syncStatusData.sync_up_id)
-                 .order('idx');
-               
-               if (!options || optionNumber < 1 || optionNumber > options.length) {
-                 responseContent = `I didn't understand that. Reply with an option number, 'Re Sync', or 'exit'.`;
-                 shouldSendSMS = true;
-                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                 return new Response(JSON.stringify({
-                   success: true,
-                   action: 'SYNC_STATUS_OPTION_ERROR',
-                   response: responseContent,
-                   optimization: 'pattern_matching'
-                 }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
-               }
-               
-               const selectedOption = options[optionNumber - 1];
-               
-               // Get crew member count
-               const { count: memberCount } = await supabase
-                 .from('crew_members')
-                 .select('*', { count: 'exact', head: true })
-                 .eq('crew_id', syncStatusData.crew_id);
-               
-               // Format the confirmation message
-               const startTime = new Date(selectedOption.start_time);
-               const endTime = selectedOption.end_time ? new Date(selectedOption.end_time) : null;
-               const dateStr = startTime.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric', timeZone: 'UTC' });
-               const startTimeStr = startTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' });
-               const endTimeStr = endTime ? `-${endTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })}` : '';
-               
-               responseContent = `Confirm: Send invites for ${syncStatusData.sync_up_name} at ${syncStatusData.location} on ${dateStr}, ${startTimeStr}${endTimeStr} to ${syncStatusData.crew_name} (${memberCount} members)?`;
-               
-               // Update conversation state for confirmation
-               await supabase
-                 .from('conversation_state')
-                 .upsert({
-                   user_id: userId,
-                   phone_number: phone_number.replace(/\D/g, ''),
-                   waiting_for: 'sync_status_invite_confirmation',
-                   current_state: 'sync_status_confirming_invite',
-                   extracted_data: [
-                     ...conversationState.extracted_data,
-                     {
-                       action: 'SYNC_STATUS_OPTION_CONFIRMED',
-                       sync_up_id: syncStatusData.sync_up_id,
-                       event_id: syncStatusData.event_id,
-                       crew_id: syncStatusData.crew_id,
-                       sync_up_name: syncStatusData.sync_up_name,
-                       location: syncStatusData.location,
-                       crew_name: syncStatusData.crew_name,
-                       selected_option_id: selectedOption.id,
-                       selected_option: selectedOption,
-                       timestamp: new Date().toISOString()
-                     }
-                   ]
-                 }, {
-                   onConflict: 'user_id'
+                 
+                 if (!syncStatusData) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up_status',
+                     workflowStep: 'sync_up_data_not_found',
+                     executionStatus: 'failure',
+                     metadata: {}
+                   });
+                   responseContent = 'Sync up data not found. Please start over.';
+                   shouldSendSMS = true;
+                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                   return new Response(JSON.stringify({
+                     success: true,
+                     action: 'SYNC_STATUS_OPTION_ERROR',
+                     response: responseContent,
+                     optimization: 'pattern_matching'
+                   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+                 }
+                 
+                 // Fetch the selected sync up option
+                 const { data: allOptions } = await supabase
+                   .from('sync_up_options')
+                   .select('*')
+                   .eq('sync_up_id', syncStatusData.sync_up_id)
+                   .order('idx');
+                 
+                 // Filter out the "None" option (idx = 0) to match the display numbering
+                 const options = allOptions ? allOptions.filter(opt => opt.idx !== 0) : null;
+                 
+                 if (!options || optionNumber < 1 || optionNumber > options.length) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up_status',
+                     workflowStep: 'invalid_option_number',
+                     executionStatus: 'failure',
+                     metadata: { option_number: optionNumber, available_options_count: options?.length || 0 }
+                   });
+                   responseContent = `I didn't understand that. Reply with an option number, 'Re Sync', or 'exit'.`;
+                   shouldSendSMS = true;
+                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                   return new Response(JSON.stringify({
+                     success: true,
+                     action: 'SYNC_STATUS_OPTION_ERROR',
+                     response: responseContent,
+                     optimization: 'pattern_matching'
+                   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+                 }
+                 
+                 const selectedOption = options[optionNumber - 1];
+                 
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up_status',
+                   workflowStep: 'option_selected',
+                   executionStatus: 'success',
+                   metadata: { 
+                     sync_up_id: syncStatusData.sync_up_id,
+                     option_number: optionNumber,
+                     option_id: selectedOption.id,
+                     option_text: selectedOption.option_text
+                   }
                  });
-               
-               shouldSendSMS = true;
-               await sendSMS(phone_number, responseContent, send_sms, phone_number);
-               
-               return new Response(JSON.stringify({
-                 success: true,
-                 action: 'SYNC_STATUS_OPTION_SELECTED',
-                 response: responseContent,
-                 optimization: 'pattern_matching'
-               }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+                 
+                 // Get crew member count
+                 const { count: memberCount } = await supabase
+                   .from('crew_members')
+                   .select('*', { count: 'exact', head: true })
+                   .eq('crew_id', syncStatusData.crew_id);
+                 
+                 // Format the confirmation message
+                 const startTime = new Date(selectedOption.start_time);
+                 const endTime = selectedOption.end_time ? new Date(selectedOption.end_time) : null;
+                 const dateStr = startTime.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric', timeZone: 'UTC' });
+                 const startTimeStr = startTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' });
+                 const endTimeStr = endTime ? `-${endTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })}` : '';
+                 
+                 responseContent = `Confirm: Send invites for ${syncStatusData.sync_up_name} at ${syncStatusData.location} on ${dateStr}, ${startTimeStr}${endTimeStr} to ${syncStatusData.crew_name} (${memberCount} members)?`;
+                 
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up_status',
+                   workflowStep: 'confirmation_shown',
+                   executionStatus: 'success',
+                   metadata: { 
+                     sync_up_id: syncStatusData.sync_up_id,
+                     sync_up_name: syncStatusData.sync_up_name,
+                     option_number: optionNumber,
+                     member_count: memberCount || 0
+                   }
+                 });
+                 
+                 // Update conversation state for confirmation
+                 await supabase
+                   .from('conversation_state')
+                   .upsert({
+                     user_id: userId,
+                     phone_number: phone_number.replace(/\D/g, ''),
+                     waiting_for: 'sync_status_invite_confirmation',
+                     current_state: 'sync_status_confirming_invite',
+                     extracted_data: [
+                       ...conversationState.extracted_data,
+                       {
+                         action: 'SYNC_STATUS_OPTION_CONFIRMED',
+                         sync_up_id: syncStatusData.sync_up_id,
+                         event_id: syncStatusData.event_id,
+                         crew_id: syncStatusData.crew_id,
+                         sync_up_name: syncStatusData.sync_up_name,
+                         location: syncStatusData.location,
+                         crew_name: syncStatusData.crew_name,
+                         selected_option_id: selectedOption.id,
+                         selected_option: selectedOption,
+                         timestamp: new Date().toISOString()
+                       }
+                     ]
+                   }, {
+                     onConflict: 'user_id'
+                   });
+                 
+                 shouldSendSMS = true;
+                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                 
+                 return new Response(JSON.stringify({
+                   success: true,
+                   action: 'SYNC_STATUS_OPTION_SELECTED',
+                   response: responseContent,
+                   optimization: 'pattern_matching'
+                 }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+               } catch (error) {
+                 console.error('Error in SYNC_STATUS_OPTION_SELECTED:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up_status',
+                   workflowStep: 'option_selected',
+                   metadata: { error: error?.message || String(error) }
+                 });
+                 responseContent = 'Failed to process option selection. Please try again.';
+                 shouldSendSMS = true;
+                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                 return new Response(JSON.stringify({
+                   success: true,
+                   action: 'SYNC_STATUS_OPTION_SELECTED',
+                   response: responseContent,
+                   optimization: 'pattern_matching'
+                 }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+               }
              } else if (action === 'SYNC_STATUS_CONFIRM_INVITE') {
                console.log('SYNC_STATUS_CONFIRM_INVITE detected');
                
-               // Re-fetch conversation state to get latest data
-               const { data: latestState } = await supabase
-                 .from('conversation_state')
-                 .select('extracted_data')
-                 .eq('user_id', userId)
-                 .maybeSingle();
-               
-               // Get option data from conversation state
-               let optionData = null;
-               if (latestState?.extracted_data && Array.isArray(latestState.extracted_data)) {
-                 for (let i = latestState.extracted_data.length - 1; i >= 0; i--) {
-                   const item = latestState.extracted_data[i];
-                   if (item.action === 'SYNC_STATUS_OPTION_CONFIRMED') {
-                     optionData = item;
-                     break;
+               try {
+                 logWorkflowStart({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up_status',
+                   workflowStep: 'confirmation_received',
+                   metadata: {}
+                 });
+                 
+                 // Re-fetch conversation state to get latest data
+                 const { data: latestState } = await supabase
+                   .from('conversation_state')
+                   .select('extracted_data')
+                   .eq('user_id', userId)
+                   .maybeSingle();
+                 
+                 // Get option data from conversation state
+                 let optionData = null;
+                 if (latestState?.extracted_data && Array.isArray(latestState.extracted_data)) {
+                   for (let i = latestState.extracted_data.length - 1; i >= 0; i--) {
+                     const item = latestState.extracted_data[i];
+                     if (item.action === 'SYNC_STATUS_OPTION_CONFIRMED') {
+                       optionData = item;
+                       break;
+                     }
                    }
                  }
-               }
-               
-               if (!optionData) {
-                 responseContent = 'Invitation data not found. Please start over.';
-                 shouldSendSMS = true;
-                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                 return new Response(JSON.stringify({
-                   success: true,
-                   action: 'SYNC_STATUS_INVITE_ERROR',
-                   response: responseContent,
-                   optimization: 'pattern_matching'
-                 }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
-               }
-               
-               // Create a new event from the selected sync up option
-               // Convert datetime to time format for database
-               const startTime = new Date(optionData.selected_option.start_time);
-               const endTime = optionData.selected_option.end_time ? new Date(optionData.selected_option.end_time) : null;
-               
-               const startTimeStr = startTime.toTimeString().split(' ')[0]; // HH:MM:SS format
-               const endTimeStr = endTime ? endTime.toTimeString().split(' ')[0] : null;
-               
-               console.log('Creating event with data:', {
-                 title: optionData.sync_up_name || 'Sync Up Event',
-                 location: optionData.location || 'TBD',
-                 start_time: startTimeStr,
-                 end_time: endTimeStr,
-                 creator_id: userId,
-                 status: 'active',
-                 event_date: optionData.selected_option.start_time.split('T')[0],
-                 notes: `Created from sync up: ${optionData.sync_up_name}`
-               });
-               
-               const { data: newEvent, error: createEventError } = await supabase
-                 .from('events')
-                 .insert({
+                 
+                 if (!optionData) {
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up_status',
+                     workflowStep: 'option_data_not_found',
+                     executionStatus: 'failure',
+                     metadata: {}
+                   });
+                   responseContent = 'Invitation data not found. Please start over.';
+                   shouldSendSMS = true;
+                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                   return new Response(JSON.stringify({
+                     success: true,
+                     action: 'SYNC_STATUS_INVITE_ERROR',
+                     response: responseContent,
+                     optimization: 'pattern_matching'
+                   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+                 }
+                 
+                 // Create a new event from the selected sync up option
+                 // Convert datetime to time format for database
+                 const startTime = new Date(optionData.selected_option.start_time);
+                 const endTime = optionData.selected_option.end_time ? new Date(optionData.selected_option.end_time) : null;
+                 
+                 const startTimeStr = startTime.toTimeString().split(' ')[0]; // HH:MM:SS format
+                 const endTimeStr = endTime ? endTime.toTimeString().split(' ')[0] : null;
+                 
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up_status',
+                   workflowStep: 'event_creation_started',
+                   executionStatus: 'pending',
+                   metadata: { sync_up_id: optionData.sync_up_id, option_id: optionData.selected_option_id }
+                 });
+                 
+                 console.log('Creating event with data:', {
                    title: optionData.sync_up_name || 'Sync Up Event',
                    location: optionData.location || 'TBD',
                    start_time: startTimeStr,
                    end_time: endTimeStr,
                    creator_id: userId,
-                   crew_id: optionData.crew_id, // Add crew_id from sync up data
                    status: 'active',
-                   event_date: optionData.selected_option.start_time.split('T')[0], // Extract date part
+                   event_date: optionData.selected_option.start_time.split('T')[0],
                    notes: `Created from sync up: ${optionData.sync_up_name}`
-                 })
-                 .select('id')
-                 .single();
+                 });
+                 
+                 const { data: newEvent, error: createEventError } = await supabase
+                   .from('events')
+                   .insert({
+                     title: optionData.sync_up_name || 'Sync Up Event',
+                     location: optionData.location || 'TBD',
+                     start_time: startTimeStr,
+                     end_time: endTimeStr,
+                     creator_id: userId,
+                     crew_id: optionData.crew_id, // Add crew_id from sync up data
+                     status: 'active',
+                     event_date: optionData.selected_option.start_time.split('T')[0], // Extract date part
+                     notes: `Created from sync up: ${optionData.sync_up_name}`
+                   })
+                   .select('id')
+                   .single();
+                 
+                 console.log('Event creation result:', { newEvent, createEventError });
+                 
+                 if (createEventError || !newEvent) {
+                   console.error('Error creating event:', createEventError);
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up_status',
+                     workflowStep: 'event_creation_failed',
+                     executionStatus: 'failure',
+                     metadata: { sync_up_id: optionData.sync_up_id, error: createEventError?.message || String(createEventError) }
+                   });
+                   responseContent = `Failed to create event: ${createEventError?.message || 'Unknown error'}. Please try again.`;
+                   shouldSendSMS = true;
+                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                   return new Response(JSON.stringify({
+                     success: true,
+                     action: 'SYNC_STATUS_INVITE_ERROR',
+                     response: responseContent,
+                     optimization: 'pattern_matching'
+                   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+                 }
+                 
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up_status',
+                   workflowStep: 'event_created',
+                   executionStatus: 'success',
+                   metadata: { 
+                     sync_up_id: optionData.sync_up_id, 
+                     event_id: newEvent.id, 
+                     event_title: optionData.sync_up_name
+                   }
+                 });
                
-               console.log('Event creation result:', { newEvent, createEventError });
-               
-               if (createEventError || !newEvent) {
-                 console.error('Error creating event:', createEventError);
-                 responseContent = `Failed to create event: ${createEventError?.message || 'Unknown error'}. Please try again.`;
-                 shouldSendSMS = true;
-                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                 return new Response(JSON.stringify({
-                   success: true,
-                   action: 'SYNC_STATUS_INVITE_ERROR',
-                   response: responseContent,
-                   optimization: 'pattern_matching'
-                 }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
-               }
-               
-               // Call send-invitations edge function
-               const inviteResponse = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/send-invitations`, {
-                 method: 'POST',
-                 headers: {
-                   'Content-Type': 'application/json',
-                   'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`
-                 },
-                 body: JSON.stringify({
-                   event_id: newEvent.id,
-                   inviting_user_id: userId,
-                   crew_id: optionData.crew_id,
-                   send_sms: send_sms
-                 })
-               });
-               
+                 // Get crew member count for logging
+                 const { count: memberCount } = await supabase
+                   .from('crew_members')
+                   .select('*', { count: 'exact', head: true })
+                   .eq('crew_id', optionData.crew_id);
+                 
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up_status',
+                   workflowStep: 'invitations_sending_started',
+                   executionStatus: 'pending',
+                   metadata: { event_id: newEvent.id, crew_id: optionData.crew_id, member_count: memberCount || 0 }
+                 });
+                 
+                 // Call send-invitations edge function
+                 const inviteResponse = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/send-invitations`, {
+                   method: 'POST',
+                   headers: {
+                     'Content-Type': 'application/json',
+                     'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`
+                   },
+                   body: JSON.stringify({
+                     event_id: newEvent.id,
+                     inviting_user_id: userId,
+                     crew_id: optionData.crew_id,
+                     send_sms: send_sms
+                   })
+                 });
+                 
               //  if (!inviteResponse.ok) {
               //    console.error('send-invitations returned error:', inviteResponse.status, inviteResponse.statusText);
               //    const errorText = await inviteResponse.text();
@@ -17001,110 +24236,174 @@ Reply with a command or contact support@funlet.ai with any questions.`;
               //      optimization: 'pattern_matching'
               //    }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
               //  }
-               
-               const inviteResult = await inviteResponse.json();
-               console.log('send-invitations response:', inviteResult);
-               
-               // Check if invitations were processed successfully
-               // send-invitations returns { message: 'Invitations processed', results: [...], ... }
-               // It doesn't have a 'success' field, so we check for the message or results
-               const invitationsProcessed = inviteResult.message === 'Invitations processed' || inviteResult.results || inviteResult.success;
-               
-               if (invitationsProcessed) {
-                 // Count successful invitations from results array
-                 const successfulInvites = inviteResult.results ? inviteResult.results.filter((r: any) => r.status === 'success' || r.status === 'sent').length : 0;
-                 const totalInvites = inviteResult.results ? inviteResult.results.length : 0;
                  
-                 // Fetch event with shorten_event_url (with retry logic)
-                 const { shorten_event_url, event: eventData } = await fetchEventWithShortUrl(supabase, newEvent.id);
-                 const eventLink = formatEventLink(newEvent.id, shorten_event_url);
+                 const inviteResult = await inviteResponse.json();
+                 console.log('send-invitations response:', inviteResult);
                  
-                 // Format date and time from separate fields
-                 // event_date is YYYY-MM-DD, start_time is HH:MM:SS
-                 let dateStr = '';
-                 let timeStr = '';
+                 // Check if invitations were processed successfully
+                 // send-invitations returns { message: 'Invitations processed', results: [...], ... }
+                 // It doesn't have a 'success' field, so we check for the message or results
+                 const invitationsProcessed = inviteResult.message === 'Invitations processed' || inviteResult.results || inviteResult.success;
                  
-                 if (eventData && eventData.event_date) {
-                   const eventDate = new Date(eventData.event_date + 'T00:00:00');
-                   dateStr = eventDate.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
-                 }
-                 
-                 if (eventData && eventData.start_time) {
-                   // Parse time string (HH:MM:SS) and format it
-                   const [hours, minutes] = eventData.start_time.split(':').map(Number);
-                   const timeDate = new Date();
-                   timeDate.setHours(hours, minutes, 0, 0);
-                   timeStr = timeDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-                 }
-                 
-                 // Use successful count if available, otherwise use total count or fallback to inviteResult.invites_sent
-                 const invitesSent = successfulInvites > 0 ? successfulInvites : (totalInvites > 0 ? totalInvites : (inviteResult.invites_sent || 0));
-                 responseContent = `${invitesSent} invites sent for ${eventData?.title || 'event'} on ${dateStr} at ${timeStr}. Check RSVPs: ${eventLink}`;
-                 
-                 // Update sync_up status to 'completed' since it's been converted to an event
-                 await supabase
-                   .from('sync_ups')
-                   .update({ status: 'completed' })
-                   .eq('id', optionData.sync_up_id);
-                 
-                 // Update all sync_up_responses to mark them as no longer needed
-                 await supabase
-                   .from('sync_up_responses')
-                   .update({ status: 'completed' })
-                   .eq('sync_up_id', optionData.sync_up_id);
-                 
-                 // Reset crew member conversation states to clear waiting_for
-                 const { data: crewMembers } = await supabase
-                   .from('crew_members')
-                   .select('user_id')
-                   .eq('crew_id', optionData.crew_id);
-                 
-                 if (crewMembers && crewMembers.length > 0) {
-                   const crewUserIds = crewMembers.map(member => member.user_id);
+                 if (invitationsProcessed) {
+                   // Count successful invitations from results array
+                   const successfulInvites = inviteResult.results ? inviteResult.results.filter((r: any) => r.status === 'success' || r.status === 'sent').length : 0;
+                   const totalInvites = inviteResult.results ? inviteResult.results.length : 0;
+                   
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up_status',
+                     workflowStep: 'invitations_sent',
+                     executionStatus: 'success',
+                     metadata: { event_id: newEvent.id, invites_sent: successfulInvites || totalInvites || 0, total_members: memberCount || 0 }
+                   });
+                   
+                   // Fetch event with shorten_event_url (with retry logic)
+                   const { shorten_event_url, event: eventData } = await fetchEventWithShortUrl(supabase, newEvent.id);
+                   const eventLink = formatEventLink(newEvent.id, shorten_event_url);
+                   
+                   // Format date and time from separate fields
+                   // event_date is YYYY-MM-DD, start_time is HH:MM:SS
+                   let dateStr = '';
+                   let timeStr = '';
+                   
+                   if (eventData && eventData.event_date) {
+                     const eventDate = new Date(eventData.event_date + 'T00:00:00');
+                     dateStr = eventDate.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
+                   }
+                   
+                   if (eventData && eventData.start_time) {
+                     // Parse time string (HH:MM:SS) and format it
+                     const [hours, minutes] = eventData.start_time.split(':').map(Number);
+                     const timeDate = new Date();
+                     timeDate.setHours(hours, minutes, 0, 0);
+                     timeStr = timeDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+                   }
+                   
+                   // Use successful count if available, otherwise use total count or fallback to inviteResult.invites_sent
+                   const invitesSent = successfulInvites > 0 ? successfulInvites : (totalInvites > 0 ? totalInvites : (inviteResult.invites_sent || 0));
+                   responseContent = `${invitesSent} invites sent for ${eventData?.title || 'event'} on ${dateStr} at ${timeStr}. Type "RSVPs" to check responses.`;
+                   
+                   // Update sync_up status to 'completed' since it's been converted to an event
                    await supabase
-                     .from('conversation_state')
-                     .update({ 
-                       waiting_for: null,
-                       current_state: 'idle',
-                       extracted_data: []
-                     })
-                     .in('user_id', crewUserIds);
+                     .from('sync_ups')
+                     .update({ status: 'completed' })
+                     .eq('id', optionData.sync_up_id);
+                   
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up_status',
+                     workflowStep: 'sync_up_marked_completed',
+                     executionStatus: 'success',
+                     metadata: { sync_up_id: optionData.sync_up_id }
+                   });
+                   
+                   // Update all sync_up_responses to mark them as no longer needed
+                   await supabase
+                     .from('sync_up_responses')
+                     .update({ status: 'completed' })
+                     .eq('sync_up_id', optionData.sync_up_id);
+                   
+                   // Reset crew member conversation states to clear waiting_for
+                   const { data: crewMembers } = await supabase
+                     .from('crew_members')
+                     .select('user_id')
+                     .eq('crew_id', optionData.crew_id);
+                   
+                   if (crewMembers && crewMembers.length > 0) {
+                     const crewUserIds = crewMembers.map(member => member.user_id);
+                     await supabase
+                       .from('conversation_state')
+                       .update({ 
+                         waiting_for: null,
+                         current_state: 'idle',
+                         extracted_data: []
+                       })
+                       .in('user_id', crewUserIds);
+                   }
+                   
+                   // Reset host conversation state to idle
+                   await resetConversationState(supabase, userId, 'SYNC_STATUS_INVITES_SENT');
+                   
+                   logWorkflowComplete({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up_status',
+                     workflowStep: 'completed',
+                     executionStatus: 'success',
+                     metadata: { 
+                       sync_up_id: optionData.sync_up_id, 
+                       event_id: newEvent.id, 
+                       invites_sent: invitesSent
+                     }
+                   });
+                   
+                   shouldSendSMS = true;
+                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                   
+                   return new Response(JSON.stringify({
+                     success: true,
+                     action: 'SYNC_STATUS_INVITES_SENT',
+                     response: responseContent,
+                     optimization: 'pattern_matching'
+                   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
+                 } else {
+                   console.error('send-invitations returned unsuccessful result:', inviteResult);
+                   const errorMessage = inviteResult.error || inviteResult.message || 'Unknown error';
+                   logWorkflowProgress({
+                     supabase,
+                     userId,
+                     workflowName: 'sync_up_status',
+                     workflowStep: 'invitations_failed',
+                     executionStatus: 'failure',
+                     metadata: { event_id: newEvent.id, error: errorMessage }
+                   });
+                   responseContent = `Failed to send invitations: ${errorMessage}. Please try again.`;
+                   shouldSendSMS = true;
+                   await sendSMS(phone_number, responseContent, send_sms, phone_number);
+                   return new Response(JSON.stringify({
+                     success: true,
+                     action: 'SYNC_STATUS_INVITE_ERROR',
+                     response: responseContent,
+                     optimization: 'pattern_matching',
+                     error_details: {
+                       type: 'invitation_send_error',
+                       result: inviteResult
+                     }
+                   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
                  }
-                 
-                 // Clear host conversation state
-                 await supabase
-                   .from('conversation_state')
-                   .delete()
-                   .eq('user_id', userId);
-                 
+               } catch (error) {
+                 console.error('Error in SYNC_STATUS_CONFIRM_INVITE:', error);
+                 logWorkflowError({
+                   supabase,
+                   userId,
+                   workflowName: 'sync_up_status',
+                   workflowStep: 'confirmation_received',
+                   metadata: { error: error?.message || String(error) }
+                 });
+                 responseContent = 'Failed to process invitation confirmation. Please try again.';
                  shouldSendSMS = true;
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                 
                  return new Response(JSON.stringify({
                    success: true,
-                   action: 'SYNC_STATUS_INVITES_SENT',
+                   action: 'SYNC_STATUS_CONFIRM_INVITE',
                    response: responseContent,
                    optimization: 'pattern_matching'
-                 }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
-               } else {
-                 console.error('send-invitations returned unsuccessful result:', inviteResult);
-                 const errorMessage = inviteResult.error || inviteResult.message || 'Unknown error';
-                 responseContent = `Failed to send invitations: ${errorMessage}. Please try again.`;
-                 shouldSendSMS = true;
-                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                 return new Response(JSON.stringify({
-                   success: true,
-                   action: 'SYNC_STATUS_INVITE_ERROR',
-                   response: responseContent,
-                   optimization: 'pattern_matching',
-                   error_details: {
-                     type: 'invitation_send_error',
-                     result: inviteResult
-                   }
                  }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }});
                }
              } else if (action === 'SYNC_STATUS_CONFIRM_INVITE_ERROR') {
                console.log('SYNC_STATUS_CONFIRM_INVITE_ERROR detected via pattern matching');
+               
+               logWorkflowProgress({
+                 supabase,
+                 userId,
+                 workflowName: 'sync_up_status',
+                 workflowStep: 'invalid_confirmation_input',
+                 executionStatus: 'failure',
+                 metadata: { invalid_input: message }
+               });
                
                responseContent = `I didn't understand that. Reply 'yes' to send invites or 'exit' to cancel.`;
                shouldSendSMS = true;
@@ -17124,15 +24423,38 @@ Reply with a command or contact support@funlet.ai with any questions.`;
                  shouldSendSMS = true;
                  
                  // Update conversation state to wait for reset confirmation
-                 await supabase
+                 const normalizedPhone = phone_number.replace(/\D/g, '');
+                 const { data: stateUpdate, error: stateError } = await supabase
                    .from('conversation_state')
-                   .upsert({
-                     user_id: userId,
-                     phone_number: phone_number,
+                   .update({
                      waiting_for: 'reset_confirmation',
                      current_state: 'reset_confirmation',
                      extracted_data: []
-                   });
+                   })
+                   .eq('user_id', userId)
+                   .select();
+                 
+                 if (stateError) {
+                   console.error('Error updating conversation state for RESET:', stateError);
+                   // If update fails (no existing record), try insert
+                   const { data: insertData, error: insertError } = await supabase
+                     .from('conversation_state')
+                     .insert({
+                     user_id: userId,
+                       phone_number: normalizedPhone,
+                     waiting_for: 'reset_confirmation',
+                     current_state: 'reset_confirmation',
+                     extracted_data: []
+                     })
+                     .select();
+                   if (insertError) {
+                     console.error('Error inserting conversation state for RESET:', insertError);
+                   } else {
+                     console.log('Conversation state inserted for RESET:', insertData);
+                   }
+                 } else {
+                   console.log('Conversation state updated for RESET:', stateUpdate);
+                 }
                  
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
                  
@@ -17162,6 +24484,18 @@ Reply with a command or contact support@funlet.ai with any questions.`;
              } else if (action === 'EXIT') {
                console.log('EXIT detected via pattern matching, ending conversation');
                
+               // Log workflow start
+               logWorkflowStart({
+                 supabase,
+                 userId,
+                 workflowName: 'exit',
+                 workflowStep: 'initiated',
+                 inputData: {
+                   action: 'EXIT',
+                   extracted_data: extractedData
+                 }
+               });
+               
                try {
                  // Reset conversation state instead of deleting
                  await supabase
@@ -17175,8 +24509,33 @@ Reply with a command or contact support@funlet.ai with any questions.`;
                    })
                    .eq('user_id', userId);
                  
+                 // Log state reset
+                 logWorkflowProgress({
+                   supabase,
+                   userId,
+                   workflowName: 'exit',
+                   workflowStep: 'state_reset',
+                   executionStatus: 'success',
+                   metadata: {
+                     action: 'EXIT'
+                   }
+                 });
+                 
                  responseContent = 'What would you like to do next?';
                  shouldSendSMS = true;
+                 
+                 // Log workflow completion
+                 logWorkflowComplete({
+                   supabase,
+                   userId,
+                   workflowName: 'exit',
+                   workflowStep: 'completed',
+                   executionStatus: 'success',
+                   outputData: {
+                     action: 'EXIT',
+                     success: true
+                   }
+                 });
                  
                  await sendSMS(phone_number, responseContent, send_sms, phone_number);
                  
@@ -17190,6 +24549,19 @@ Reply with a command or contact support@funlet.ai with any questions.`;
                  });
               } catch (error) {
                 console.error('Error in EXIT:', error);
+                
+                // Log workflow error
+                logWorkflowError({
+                  supabase,
+                  userId,
+                  workflowName: 'exit',
+                  workflowStep: 'error',
+                  errorDetails: {
+                    error_message: error instanceof Error ? error.message : String(error),
+                    error_stack: error instanceof Error ? error.stack : undefined
+                  }
+                });
+                
                 responseContent = 'What would you like to do next?';
                 shouldSendSMS = true;
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -17282,93 +24654,23 @@ Reply with a command or contact support@funlet.ai with any questions.`;
                   headers: { ...corsHeaders, 'Content-Type': 'application/json' }
                 });
               }
-            } else if (action === 'RESET_CONFIRMATION_YES') {
-               console.log('RESET_CONFIRMATION_YES detected via pattern matching, clearing conversation state');
-               
-               try {
-                 // Reset conversation state instead of deleting
-                 await supabase
-                   .from('conversation_state')
-                   .update({
-                     current_state: 'normal',
-                     waiting_for: null,
-                     extracted_data: [],
-                     last_action: 'RESET_CONFIRMATION_YES',
-                     last_action_timestamp: new Date().toISOString()
-                   })
-                   .eq('user_id', userId);
-                 
-                 responseContent = 'Conversation reset. You can start fresh with any command.';
-                 shouldSendSMS = true;
-                 
-                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                 
-                 return new Response(JSON.stringify({
-                   success: true,
-                   action: 'RESET_CONFIRMATION_YES',
-                   response: responseContent,
-                   optimization: 'pattern_matching'
-                 }), {
-                   headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                 });
-               } catch (error) {
-                 console.error('Error in RESET_CONFIRMATION_YES:', error);
-                 responseContent = 'Failed to reset conversation. Please try again.';
-                 shouldSendSMS = true;
-                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                 
-                 return new Response(JSON.stringify({
-                   success: true,
-                   action: 'RESET_CONFIRMATION_YES',
-                   response: responseContent,
-                   optimization: 'pattern_matching'
-                 }), {
-                   headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                 });
-               }
-             } else if (action === 'RESET_CONFIRMATION_NO') {
-               console.log('RESET_CONFIRMATION_NO detected via pattern matching, cancelling reset');
-               
-               try {
-                 // Clear the reset confirmation state but keep other conversation state
-                 await supabase
-                   .from('conversation_state')
-                   .update({
-                     waiting_for: null,
-                     current_state: 'normal'
-                   })
-                   .eq('user_id', userId);
-                 
-                 responseContent = 'Reset cancelled. You can continue with your current conversation.';
-                 shouldSendSMS = true;
-                 
-                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                 
-                 return new Response(JSON.stringify({
-                   success: true,
-                   action: 'RESET_CONFIRMATION_NO',
-                   response: responseContent,
-                   optimization: 'pattern_matching'
-                 }), {
-                   headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                 });
-               } catch (error) {
-                 console.error('Error in RESET_CONFIRMATION_NO:', error);
-                 responseContent = 'Failed to cancel reset. Please try again.';
-                 shouldSendSMS = true;
-                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
-                 
-                 return new Response(JSON.stringify({
-                   success: true,
-                   action: 'RESET_CONFIRMATION_NO',
-                   response: responseContent,
-                   optimization: 'pattern_matching'
-                 }), {
-                   headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-                 });
-               }
-             } else if (action === 'ADD_CREW_MEMBERS') {
+            }  else if (action === 'ADD_CREW_MEMBERS') {
                console.log('ADD_CREW_MEMBERS detected via pattern matching, bypassing AI');
+               
+               // Log flow started
+               logWorkflowStart({
+                 supabase,
+                 userId,
+                 workflowName: 'add_crew_members',
+                 workflowStep: 'initiated',
+                 inputData: {
+                   crew_members: extractedData.crew_members || null,
+                   crew_name: extractedData.crewName || null,
+                   action: 'ADD_CREW_MEMBERS',
+                   extracted_data: extractedData
+                 }
+               });
+               
         try {
           // Check if there's a crew_id in the conversation state first
           let crewId = null;
@@ -17382,6 +24684,22 @@ Reply with a command or contact support@funlet.ai with any questions.`;
               if (item.crew_id || item.executed_data?.crew_id) {
                 crewId = item.crew_id || item.executed_data.crew_id;
                 crewName = item.crew_name || item.executed_data?.crew_name;
+                
+                // Log flow step: crew lookup from context
+                logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'add_crew_members',
+                  workflowStep: 'crew_lookup_from_context',
+                  executionStatus: 'pending',
+                  crewId: crewId,
+                  metadata: {
+                    crew_id: crewId,
+                    crew_name: crewName,
+                    found: true
+                  }
+                });
+                
                 break;
               }
             }
@@ -17415,6 +24733,18 @@ Reply with a command or contact support@funlet.ai with any questions.`;
           if (!crewId && extractedData.crewName) {
             console.log('Crew name extracted from pattern:', extractedData.crewName);
             
+            // Log flow step: crew lookup by name
+            logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'add_crew_members',
+              workflowStep: 'crew_lookup_by_name',
+              executionStatus: 'pending',
+              metadata: {
+                crew_name_searched: extractedData.crewName
+              }
+            });
+            
             // Handle "my crew" as no specific crew
             if (extractedData.crewName.toLowerCase() === 'my crew') {
               console.log('"my crew" detected, treating as no specific crew');
@@ -17433,6 +24763,22 @@ Reply with a command or contact support@funlet.ai with any questions.`;
                 crewId = userCrews[0].id;
                 crewName = userCrews[0].name;
                 console.log('Auto-selected crew:', crewName, crewId);
+                
+                // Log flow step: crew found by name
+                logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'add_crew_members',
+                  workflowStep: 'crew_lookup_by_name',
+                  executionStatus: 'pending',
+                  crewId: crewId,
+                  metadata: {
+                    crew_name_searched: extractedData.crewName,
+                    found: true,
+                    crew_id: crewId,
+                    crew_name: crewName
+                  }
+                });
                 
                 // Update conversation state to member adding mode
                 await supabase
@@ -17467,6 +24813,19 @@ Reply with a command or contact support@funlet.ai with any questions.`;
                 });
               } else {
                 // Crew not found
+                // Log flow step: crew not found
+                logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'add_crew_members',
+                  workflowStep: 'crew_not_found',
+                  executionStatus: 'pending',
+                  metadata: {
+                    crew_name_searched: extractedData.crewName,
+                    error: 'crew_not_found'
+                  }
+                });
+                
                 responseContent = `Crew '${extractedData.crewName}' not found. Reply with a crew number or 'Create Crew'.`;
                 shouldSendSMS = true;
                 await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -17490,8 +24849,35 @@ Reply with a command or contact support@funlet.ai with any questions.`;
             if (extractedData.crew_members && extractedData.crew_members.length > 0) {
               const members = extractedData.crew_members;
               
+              // Log flow step: validate members
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'add_crew_members',
+                workflowStep: 'validate_members',
+                executionStatus: 'pending',
+                crewId: crewId,
+                metadata: {
+                  member_count: members.length
+                }
+              });
+              
               // NEW: Validate that we actually parsed valid member data
               const hasValidMembers = members.every(m => m.name && m.phone);
+              
+              // Log validation result
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'add_crew_members',
+                workflowStep: 'validate_members',
+                executionStatus: hasValidMembers ? 'pending' : 'pending',
+                crewId: crewId,
+                metadata: {
+                  member_count: members.length,
+                  has_valid_members: hasValidMembers
+                }
+              });
               
               if (!hasValidMembers) {
                 // Check if multiple names without phone numbers
@@ -17533,6 +24919,21 @@ Reply with a command or contact support@funlet.ai with any questions.`;
                   headers: { ...corsHeaders, 'Content-Type': 'application/json' }
                 });
               }
+              
+              // Log flow step: process members
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'add_crew_members',
+                workflowStep: 'process_members',
+                executionStatus: 'pending',
+                crewId: crewId,
+                metadata: {
+                  member_count: members.length,
+                  crew_id: crewId,
+                  crew_name: crewName
+                }
+              });
               
               // Add members immediately (no confirmation) - add to existing crew
               const addedMembers = [];
@@ -17625,6 +25026,22 @@ Reply with a command or contact support@funlet.ai with any questions.`;
                 
                 if (existingMember) {
                   console.log(`Contact ${member.name} is already a member of this crew, skipping...`);
+                  
+                  // Log flow step: member already exists
+                  logWorkflowProgress({
+                    supabase,
+                    userId,
+                    workflowName: 'add_crew_members',
+                    workflowStep: 'member_already_exists',
+                    executionStatus: 'pending',
+                    crewId: crewId,
+                    metadata: {
+                      member_name: member.name,
+                      member_phone: member.phone,
+                      crew_id: crewId
+                    }
+                  });
+                  
                   // Store both name and phone for formatted display
                   skippedMembers.push({ name: member.name, phone: member.phone });
                   continue;
@@ -17643,6 +25060,21 @@ Reply with a command or contact support@funlet.ai with any questions.`;
                   continue;
                 }
                 
+                // Log flow step: member added
+                logWorkflowProgress({
+                  supabase,
+                  userId,
+                  workflowName: 'add_crew_members',
+                  workflowStep: 'member_added',
+                  executionStatus: 'pending',
+                  crewId: crewId,
+                  metadata: {
+                    member_name: member.name,
+                    member_phone: member.phone,
+                    crew_id: crewId
+                  }
+                });
+                
                 addedMembers.push(member.name);
               }
               
@@ -17656,10 +25088,44 @@ Reply with a command or contact support@funlet.ai with any questions.`;
                 }).join(', ');
                 responseContent = `Added ${addedMembers.join(', ')} to ${crewName}. ${skippedFormatted} ${skippedMembers.length === 1 ? 'is' : 'are'} already in ${crewName}.\n\nTo add more members:\n\nType a name already in Funlet: Mike\nType a name and number for a new crew member: Mike 4155551234\nShare link for people to add themselves: ${joinLink}\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
                 shouldSendSMS = true;
+                
+                // Log flow completed
+                logWorkflowComplete({
+                  supabase,
+                  userId,
+                  workflowName: 'add_crew_members',
+                  workflowStep: 'completed',
+                  executionStatus: 'success',
+                  crewId: crewId,
+                  outputData: {
+                    crew_id: crewId,
+                    crew_name: crewName,
+                    added_members_count: addedMembers.length,
+                    skipped_members_count: skippedMembers.length,
+                    success: true
+                  }
+                });
               } else if (addedMembers.length > 0) {
                 // All added successfully
                 responseContent = `Added ${addedMembers.join(', ')} to ${crewName}.\n\nTo add more members:\n\nType a name already in Funlet: Mike\nType a name and number for a new crew member: Mike 4155551234\nShare link for people to add themselves: ${joinLink}\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
                 shouldSendSMS = true;
+                
+                // Log flow completed
+                logWorkflowComplete({
+                  supabase,
+                  userId,
+                  workflowName: 'add_crew_members',
+                  workflowStep: 'completed',
+                  executionStatus: 'success',
+                  crewId: crewId,
+                  outputData: {
+                    crew_id: crewId,
+                    crew_name: crewName,
+                    added_members_count: addedMembers.length,
+                    skipped_members_count: 0,
+                    success: true
+                  }
+                });
               } else if (skippedMembers.length > 0) {
                 // All were already members - format with phone numbers
                 const skippedFormatted = skippedMembers.map(m => {
@@ -17668,14 +25134,63 @@ Reply with a command or contact support@funlet.ai with any questions.`;
                 }).join(', ');
                 responseContent = `${skippedFormatted} ${skippedMembers.length === 1 ? 'is' : 'are'} already in ${crewName}.\n\nTo add more members:\n\nType a name already in Funlet: Mike\nType a name and number for a new crew member: Mike 4155551234\nShare link for people to add themselves: ${joinLink}\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
                 shouldSendSMS = true;
+                
+                // Log flow completed (all members already existed)
+                logWorkflowComplete({
+                  supabase,
+                  userId,
+                  workflowName: 'add_crew_members',
+                  workflowStep: 'completed',
+                  executionStatus: 'success',
+                  crewId: crewId,
+                  outputData: {
+                    crew_id: crewId,
+                    crew_name: crewName,
+                    added_members_count: 0,
+                    skipped_members_count: skippedMembers.length,
+                    success: true,
+                    note: 'all_members_already_existed'
+                  }
+                });
               } else {
                 // Failed to parse or process any members
                 const joinLinkError = await getCrewJoinLink(supabase, crewId);
                 responseContent = `Failed to add members to ${crewName}. Please try again.\n\nShare link for people to add themselves: ${joinLinkError}\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
                 shouldSendSMS = true;
+                
+                // Log workflow error (failed to process)
+                logWorkflowError({
+                  supabase,
+                  userId,
+                  workflowName: 'add_crew_members',
+                  workflowStep: 'process_members_failed',
+                  errorDetails: {
+                    error: 'failed_to_parse_or_process_members'
+                  },
+                  crewId: crewId,
+                  metadata: {
+                    crew_id: crewId,
+                    crew_name: crewName
+                  }
+                });
               }
             } else {
               // No member data provided - ask for member info
+              // Log flow step: ask for member info
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'add_crew_members',
+                workflowStep: 'ask_for_member_info',
+                executionStatus: 'pending',
+                crewId: crewId,
+                metadata: {
+                  crew_id: crewId,
+                  crew_name: crewName,
+                  waiting_for: 'crew_member_addition'
+                }
+              });
+              
               const joinLink = await getCrewJoinLink(supabase, crewId);
               responseContent = `To add members:\n\nType a name already in Funlet: Tom\nType a name and number for a new crew member: Tom 4155551234\nShare link for people to add themselves: ${joinLink}\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
               shouldSendSMS = true;
@@ -17699,13 +25214,40 @@ Reply with a command or contact support@funlet.ai with any questions.`;
               .eq('creator_id', userId)
               .order('name');
             
+            // Log flow step: crew selection required
+            logWorkflowProgress({
+              supabase,
+              userId,
+              workflowName: 'add_crew_members',
+              workflowStep: 'crew_selection_required',
+              executionStatus: 'pending',
+              metadata: {
+                crew_count: userCrews?.length || 0
+              }
+            });
+            
             if (userCrews && userCrews.length === 0) {
               // No crews found - ask to create one first
               responseContent = 'No crews found. Type "Create Crew" to create your first crew.';
               shouldSendSMS = true;
             } else if (userCrews && userCrews.length === 1) {
               // User has exactly one crew - auto-select and proceed
+              // Log flow step: auto-select single crew
               const crew = userCrews[0];
+              
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'add_crew_members',
+                workflowStep: 'auto_select_single_crew',
+                executionStatus: 'pending',
+                crewId: crew.id,
+                metadata: {
+                  crew_id: crew.id,
+                  crew_name: crew.name
+                }
+              });
+              
               const joinLink = await getCrewJoinLink(supabase, crew.id);
               responseContent = `To add members:\n\nType a name already in Funlet: Tom\nType a name and number for a new crew member: Tom 4155551234\nShare link for people to add themselves: ${joinLink}\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
               shouldSendSMS = true;
@@ -17725,6 +25267,18 @@ Reply with a command or contact support@funlet.ai with any questions.`;
                 .eq('user_id', userId);
             } else {
               // User has multiple crews - show numbered list for selection
+              // Log flow step: show crew list
+              logWorkflowProgress({
+                supabase,
+                userId,
+                workflowName: 'add_crew_members',
+                workflowStep: 'show_crew_list',
+                executionStatus: 'pending',
+                metadata: {
+                  crew_count: userCrews.length
+                }
+              });
+              
               let crewList = 'Add members to which crew?\n';
               userCrews.forEach((crew, index) => {
                 crewList += `${index + 1}. ${crew.name}\n`;
@@ -17779,6 +25333,22 @@ Reply with a command or contact support@funlet.ai with any questions.`;
           });
         } catch (error) {
           console.error('Error in ADD_CREW_MEMBERS pattern matching:', error);
+          
+          // Log workflow error
+          logWorkflowError({
+            supabase,
+            userId,
+            workflowName: 'add_crew_members',
+            workflowStep: 'error',
+            errorDetails: {
+              error_message: error.message,
+              error_stack: error.stack
+            },
+            metadata: {
+              crew_id: crewId || null
+            }
+          });
+          
           responseContent = 'Failed to add members. Please try again.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
@@ -17927,7 +25497,7 @@ Reply with a command or contact support@funlet.ai with any questions.`;
               ? `${cleanDigits.substring(0, 3)}-${cleanDigits.substring(3, 6)}-${cleanDigits.substring(6)}`
               : contact.phone_number;
             
-            responseContent = `Found ${displayName} (${formattedPhone}). Add to ${crewName}? Reply 'y' to add, or type a name and number for a new crew member.`;
+            responseContent = `Found ${displayName} (${formattedPhone}). Add to ${crewName}? Reply y to add, n to go back.`;
             shouldSendSMS = true;
             
             // Store contact info in conversation state for confirmation
@@ -18206,6 +25776,74 @@ Reply with a command or contact support@funlet.ai with any questions.`;
           return new Response(JSON.stringify({
             success: true,
             action: 'CONFIRM_ADD_CONTACT',
+            response: responseContent,
+            optimization: 'pattern_matching'
+          }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        }
+      } else if (action === 'CANCEL_ADD_CONTACT') {
+        console.log('CANCEL_ADD_CONTACT detected via pattern matching');
+        
+        try {
+          // Get crew info from conversation state
+          let crewId = null;
+          let crewName = null;
+          
+          if (conversationState?.extracted_data && Array.isArray(conversationState.extracted_data)) {
+            for (let i = conversationState.extracted_data.length - 1; i >= 0; i--) {
+              const item = conversationState.extracted_data[i];
+              if (item.action === 'CONTACT_SEARCH_RESULT') {
+                crewId = item.crew_id;
+                crewName = item.crew_name;
+                break;
+              }
+            }
+          }
+          
+          if (!crewId || !crewName) {
+            responseContent = 'Crew information not found. Please try again.';
+            shouldSendSMS = true;
+            await sendSMS(phone_number, responseContent, send_sms, phone_number);
+            return new Response(JSON.stringify({
+              success: true,
+              action: 'CANCEL_ADD_CONTACT',
+              response: responseContent,
+              optimization: 'pattern_matching'
+            }), {
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+          }
+          
+          const joinLink = await getCrewJoinLink(supabase, crewId);
+          responseContent = `To add members to ${crewName}:\n\nType a name already in Funlet: Tom\nType a name and number for a new crew member: Tom 4155551234\nShare link for people to add themselves: ${joinLink}\n\nWhen ready, type 'Create Event', 'Sync Up', or 'exit'.`;
+          shouldSendSMS = true;
+          
+          // Reset to add-members flow
+          await supabase
+            .from('conversation_state')
+            .update({
+              waiting_for: conversationState?.waiting_for === 'member_adding_mode' ? 'member_adding_mode' : 'crew_member_addition'
+            })
+            .eq('user_id', userId);
+          
+          await sendSMS(phone_number, responseContent, send_sms, phone_number);
+          return new Response(JSON.stringify({
+            success: true,
+            action: 'CANCEL_ADD_CONTACT',
+            response: responseContent,
+            optimization: 'pattern_matching'
+          }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        } catch (error) {
+          console.error('Error in CANCEL_ADD_CONTACT:', error);
+          responseContent = 'Error returning to add crew member. Please try again.';
+          shouldSendSMS = true;
+          await sendSMS(phone_number, responseContent, send_sms, phone_number);
+          return new Response(JSON.stringify({
+            success: true,
+            action: 'CANCEL_ADD_CONTACT',
             response: responseContent,
             optimization: 'pattern_matching'
           }), {
@@ -18691,160 +26329,6 @@ Reply with a command or contact support@funlet.ai with any questions.`;
 
     // EMERGENCY ESCAPE COMMANDS - Execute before AI classification
     const cleanMessage = message.toLowerCase().trim();
-    
- 
-
-    // Handle reset confirmation responses
-    const { data: resetState } = await supabase
-          .from('conversation_state')
-          .select('waiting_for')
-          .eq('user_id', userId)
-          .single();
-        
-    if (resetState?.waiting_for === 'reset_confirmation') {
-      if (cleanMessage === 'yes') {
-        // User confirmed reset - execute full reset
-        console.log('RESET confirmed by user, executing full reset...');
-          
-          // Get current thread ID before deletion
-          const { data: stateData } = await supabase
-            .from('conversation_state')
-            .select('thread_id')
-            .eq('user_id', userId)
-            .single();
-          
-          const currentThreadId = stateData?.thread_id;
-          
-          // Delete OpenAI thread if it exists
-          if (currentThreadId) {
-            try {
-              const deleteResponse = await fetch(`https://api.openai.com/v1/threads/${currentThreadId}`, {
-                method: 'DELETE',
-                headers: {
-                  'Authorization': `Bearer ${Deno.env.get('OPENAI_API_KEY')}`,
-                  'OpenAI-Beta': 'assistants=v2'
-                }
-              });
-              
-              if (deleteResponse.ok) {
-                console.log('OpenAI thread deleted successfully:', currentThreadId);
-              } else {
-                console.log('OpenAI thread deletion failed, continuing with reset:', await deleteResponse.text());
-              }
-            } catch (threadError) {
-              console.error('Error deleting OpenAI thread, continuing with reset:', threadError);
-            }
-          }
-          
-          // Reset conversation state instead of deleting
-          await supabase
-            .from('conversation_state')
-            .update({
-              current_state: 'normal',
-              waiting_for: null,
-              extracted_data: [],
-              last_action: 'RESET_COMMAND',
-              last_action_timestamp: new Date().toISOString()
-            })
-            .eq('user_id', userId);
-          
-          // Create new OpenAI thread
-          const threadResponse = await fetch('https://api.openai.com/v1/threads', {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${Deno.env.get('OPENAI_API_KEY')}`,
-              'Content-Type': 'application/json',
-              'OpenAI-Beta': 'assistants=v2'
-            },
-            body: JSON.stringify({})
-          });
-
-          if (!threadResponse.ok) {
-            const errorText = await threadResponse.text();
-            console.error('Failed to create OpenAI thread:', errorText);
-            throw new Error('Failed to create new thread');
-          }
-
-          const threadData = await threadResponse.json();
-          const newThreadId = threadData.id;
-          
-          // Create new conversation state
-          const { data: newState, error: insertError } = await supabase
-            .from('conversation_state')
-            .insert({
-              user_id: userId,
-              phone_number: phone_number,
-              thread_id: newThreadId,
-              current_state: 'normal',
-              thread_created_at: new Date().toISOString(),
-              last_action: 'RESET_COMMAND',
-              last_action_timestamp: new Date().toISOString(),
-              created_at: new Date().toISOString(),
-              updated_at: new Date().toISOString()
-            })
-            .select()
-            .single();
-          
-          if (insertError) {
-            throw insertError;
-          }
-          
-          const resetResponse = 'Reset complete. What would you like to do?';
-          
-          // Send SMS response
-          if (phone_number) {
-            const smsResult = await sendSMS(phone_number, resetResponse, send_sms, phone_number);
-            console.log('RESET SMS sent successfully:', smsResult);
-          }
-          
-          console.log('RESET: Complete reset executed for user:', userId, 'with new thread:', newThreadId);
-          
-          return new Response(JSON.stringify({
-            action: 'RESET',
-            content: resetResponse,
-            success: true,
-            new_thread_id: newThreadId
-          }), {
-            status: 200,
-            headers: {
-              ...corsHeaders,
-              'Content-Type': 'application/json'
-            }
-          });
-        } else {
-        // User cancelled reset
-        console.log('RESET cancelled by user');
-        
-          await supabase
-            .from('conversation_state')
-            .update({
-            waiting_for: null,
-            last_action: 'RESET_CANCELLED',
-              last_action_timestamp: new Date().toISOString()
-            })
-            .eq('user_id', userId);
-          
-        const cancelResponse = 'Reset cancelled.';
-          
-          // Send SMS response
-          if (phone_number) {
-          const smsResult = await sendSMS(phone_number, cancelResponse, send_sms, phone_number);
-          console.log('RESET cancellation SMS sent successfully:', smsResult);
-          }
-          
-          return new Response(JSON.stringify({
-          action: 'RESET_CANCELLED',
-          content: cancelResponse,
-            success: true
-          }), {
-            status: 200,
-            headers: {
-              ...corsHeaders,
-              'Content-Type': 'application/json'
-            }
-          });
-        }
-    }
 
     // Get conversation context before adding message to thread
     let conversationContext = '';
@@ -18914,7 +26398,27 @@ Reply with a command or contact support@funlet.ai with any questions.`;
     if (!runResponse.ok) {
       const errorText = await runResponse.text();
       console.error('OpenAI Run Error:', errorText);
+      // Log assistant run start failure
+      try {
+        await logError({
+          supabase,
+          userId: userId || null,
+          workflowName: 'ai_assistant',
+          workflowStep: 'run_start_failed',
+          error: new Error('Failed to run assistant'),
+          metadata: {
+            assistant_id: assistantId,
+            thread_id: threadId,
+            model,
+            error_text: errorText
+          }
+        });
+      } catch (logErr) {
+        console.error('Failed to log assistant run start error:', logErr);
+      }
       return new Response(JSON.stringify({
+        success: false,
+        action: 'ASSISTANT_RUN_START_FAILED',
         error: 'Failed to run assistant',
         details: errorText
       }), {
@@ -18933,11 +26437,34 @@ Reply with a command or contact support@funlet.ai with any questions.`;
     let attempts = 0;
     const maxAttempts = 30; // 30 seconds max wait
     let runStatus = 'queued';
+    let statusCheckFailures = 0;
+    const maxStatusCheckFailures = 3; // Allow up to 3 consecutive status check failures
 
     while (runStatus === 'queued' || runStatus === 'in_progress') {
       if (attempts >= maxAttempts) {
+        // Log assistant run timeout
+        try {
+          await logError({
+            supabase,
+            userId: userId || null,
+            workflowName: 'ai_assistant',
+            workflowStep: 'run_timeout',
+            error: new Error('Assistant run timed out'),
+            metadata: {
+              assistant_id: assistantId,
+              thread_id: threadId,
+              run_id: runId,
+              attempts: maxAttempts
+            }
+          });
+        } catch (logErr) {
+          console.error('Failed to log assistant run timeout:', logErr);
+        }
         return new Response(JSON.stringify({
-          error: 'Assistant run timed out'
+          success: false,
+          action: 'ASSISTANT_RUN_TIMEOUT',
+          error: 'Assistant run timed out',
+          attempts: maxAttempts
         }), {
           status: 408,
           headers: {
@@ -18960,7 +26487,84 @@ Reply with a command or contact support@funlet.ai with any questions.`;
       if (statusResponse.ok) {
         const statusData = await statusResponse.json();
         runStatus = statusData.status;
+        statusCheckFailures = 0; // Reset failure counter on success
         console.log('Run status:', runStatus);
+        console.log('Full status response:', JSON.stringify(statusData, null, 2));
+        if (statusData.last_error) {
+          console.error('OpenAI Run Error Details:', JSON.stringify(statusData.last_error, null, 2));
+          // Handle last_error - return error response
+          try {
+            await logError({
+              supabase,
+              userId: userId || null,
+              workflowName: 'ai_assistant',
+              workflowStep: 'assistant_run_error',
+              error: new Error('Assistant run error'),
+              metadata: {
+                assistant_id: assistantId,
+                thread_id: threadId,
+                run_id: runId,
+                last_error: statusData.last_error
+              }
+            });
+          } catch (logErr) {
+            console.error('Failed to log assistant run error:', logErr);
+          }
+          return new Response(JSON.stringify({
+            success: false,
+            action: 'ASSISTANT_RUN_ERROR',
+            error: 'Assistant run error',
+            error_details: statusData.last_error
+          }), {
+            status: 500,
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'application/json'
+            }
+          });
+        }
+      } else {
+        const errorText = await statusResponse.text();
+        console.error('Failed to check run status:', statusResponse.status, errorText);
+        statusCheckFailures++;
+        // Log status check failure
+        try {
+          await logError({
+            supabase,
+            userId: userId || null,
+            workflowName: 'ai_assistant',
+            workflowStep: 'run_status_check_failed',
+            error: new Error('Failed to check run status'),
+            metadata: {
+              assistant_id: assistantId,
+              thread_id: threadId,
+              run_id: runId,
+              http_status: statusResponse.status,
+              error_text: errorText,
+              consecutive_failures: statusCheckFailures
+            }
+          });
+        } catch (logErr) {
+          console.error('Failed to log run status check error:', logErr);
+        }
+        
+        // Return error after too many consecutive failures
+        if (statusCheckFailures >= maxStatusCheckFailures) {
+          return new Response(JSON.stringify({
+            success: false,
+            action: 'ASSISTANT_STATUS_CHECK_FAILED',
+            error: 'Failed to check assistant run status',
+            consecutive_failures: statusCheckFailures,
+            http_status: statusResponse.status,
+            error_text: errorText
+          }), {
+            status: 500,
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'application/json'
+            }
+          });
+        }
       }
     }
 
@@ -19002,11 +26606,34 @@ Reply with a command or contact support@funlet.ai with any questions.`;
           let submitAttempts = 0;
           const maxSubmitAttempts = 30;
           let submitStatus = 'queued';
+          let submitStatusCheckFailures = 0;
+          const maxSubmitStatusCheckFailures = 3; // Allow up to 3 consecutive status check failures
 
           while (submitStatus === 'queued' || submitStatus === 'in_progress') {
             if (submitAttempts >= maxSubmitAttempts) {
+              // Log timeout after tool submission
+              try {
+                await logError({
+                  supabase,
+                  userId: userId || null,
+                  workflowName: 'ai_assistant',
+                  workflowStep: 'run_timeout_after_tool_submission',
+                  error: new Error('Assistant run timed out after tool submission'),
+                  metadata: {
+                    assistant_id: assistantId,
+                    thread_id: threadId,
+                    run_id: runId,
+                    max_submit_attempts: maxSubmitAttempts
+                  }
+                });
+              } catch (logErr) {
+                console.error('Failed to log assistant submit timeout:', logErr);
+              }
               return new Response(JSON.stringify({
-                error: 'Assistant run timed out after tool submission'
+                success: false,
+                action: 'ASSISTANT_TOOL_SUBMISSION_TIMEOUT',
+                error: 'Assistant run timed out after tool submission',
+                max_submit_attempts: maxSubmitAttempts
               }), {
                 status: 408,
                 headers: {
@@ -19029,12 +26656,109 @@ Reply with a command or contact support@funlet.ai with any questions.`;
             if (statusResponse.ok) {
               const statusData = await statusResponse.json();
               submitStatus = statusData.status;
+              submitStatusCheckFailures = 0; // Reset failure counter on success
               console.log('Submit status:', submitStatus);
+              console.log('Full submit status response:', JSON.stringify(statusData, null, 2));
+              if (statusData.last_error) {
+                console.error('OpenAI Submit Error Details:', JSON.stringify(statusData.last_error, null, 2));
+                // Handle last_error - return error response
+                try {
+                  await logError({
+                    supabase,
+                    userId: userId || null,
+                    workflowName: 'ai_assistant',
+                    workflowStep: 'assistant_submit_error',
+                    error: new Error('Assistant submit error'),
+                    metadata: {
+                      assistant_id: assistantId,
+                      thread_id: threadId,
+                      run_id: runId,
+                      last_error: statusData.last_error
+                    }
+                  });
+                } catch (logErr) {
+                  console.error('Failed to log assistant submit error:', logErr);
+                }
+                return new Response(JSON.stringify({
+                  success: false,
+                  action: 'ASSISTANT_RUN_ERROR',
+                  error: 'Assistant run error during tool submission',
+                  error_details: statusData.last_error
+                }), {
+                  status: 500,
+                  headers: {
+                    ...corsHeaders,
+                    'Content-Type': 'application/json'
+                  }
+                });
+              }
+            } else {
+              const errorText = await statusResponse.text();
+              console.error('Failed to check submit status:', statusResponse.status, errorText);
+              submitStatusCheckFailures++;
+              // Log submit status check failure
+              try {
+                await logError({
+                  supabase,
+                  userId: userId || null,
+                  workflowName: 'ai_assistant',
+                  workflowStep: 'submit_status_check_failed',
+                  error: new Error('Failed to check submit status'),
+                  metadata: {
+                    assistant_id: assistantId,
+                    thread_id: threadId,
+                    run_id: runId,
+                    http_status: statusResponse.status,
+                    error_text: errorText,
+                    consecutive_failures: submitStatusCheckFailures
+                  }
+                });
+              } catch (logErr) {
+                console.error('Failed to log submit status check error:', logErr);
+              }
+              
+              // Return error after too many consecutive failures
+              if (submitStatusCheckFailures >= maxSubmitStatusCheckFailures) {
+                return new Response(JSON.stringify({
+                  success: false,
+                  action: 'ASSISTANT_SUBMIT_STATUS_CHECK_FAILED',
+                  error: 'Failed to check assistant submit status',
+                  consecutive_failures: submitStatusCheckFailures,
+                  http_status: statusResponse.status,
+                  error_text: errorText
+                }), {
+                  status: 500,
+                  headers: {
+                    ...corsHeaders,
+                    'Content-Type': 'application/json'
+                  }
+                });
+              }
             }
           }
 
           if (submitStatus !== 'completed') {
+            // Log failure after tool submission
+            try {
+              await logError({
+                supabase,
+                userId: userId || null,
+                workflowName: 'ai_assistant',
+                workflowStep: 'run_failed_after_tool_submission',
+                error: new Error(`Assistant run failed after tool submission with status: ${submitStatus}`),
+                metadata: {
+                  assistant_id: assistantId,
+                  thread_id: threadId,
+                  run_id: runId,
+                  submit_status: submitStatus
+                }
+              });
+            } catch (logErr) {
+              console.error('Failed to log assistant failure after tool submission:', logErr);
+            }
             return new Response(JSON.stringify({
+              success: false,
+              action: 'ASSISTANT_TOOL_SUBMISSION_FAILED',
               error: 'Assistant run failed after tool submission',
               status: submitStatus
             }), {
@@ -19048,9 +26772,55 @@ Reply with a command or contact support@funlet.ai with any questions.`;
         }
       }
     } else if (runStatus !== 'completed') {
+      // Get final status details to log error information
+      const finalStatusResponse = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs/${runId}`, {
+        headers: {
+          'Authorization': `Bearer ${Deno.env.get('OPENAI_API_KEY')}`,
+          'OpenAI-Beta': 'assistants=v2'
+        }
+      });
+      
+      let errorDetails = null;
+      if (finalStatusResponse.ok) {
+        const finalStatusData = await finalStatusResponse.json();
+        console.error('❌ Assistant run failed with status:', runStatus);
+        console.error('Full final status response:', JSON.stringify(finalStatusData, null, 2));
+        if (finalStatusData.last_error) {
+          errorDetails = finalStatusData.last_error;
+          console.error('OpenAI Last Error:', JSON.stringify(finalStatusData.last_error, null, 2));
+        }
+      } else {
+        const errorText = await finalStatusResponse.text();
+        console.error('Failed to get final status:', finalStatusResponse.status, errorText);
+      }
+      
+      // Log the error using our error logging system
+      try {
+        await logError({
+          supabase,
+          userId: userId || null,
+          workflowName: 'ai_assistant',
+          workflowStep: 'assistant_run_failed',
+          error: new Error(`Assistant run failed with status: ${runStatus}`),
+          metadata: {
+            run_status: runStatus,
+            run_id: runId,
+            thread_id: threadId,
+            assistant_id: assistantId,
+            error_details: errorDetails,
+            phone_number: phone_number
+          }
+        });
+      } catch (logErr) {
+        console.error('Failed to log error:', logErr);
+      }
+      
       return new Response(JSON.stringify({
+        success: false,
+        action: 'ASSISTANT_RUN_FAILED',
         error: 'Assistant run failed',
-        status: runStatus
+        status: runStatus,
+        error_details: errorDetails
       }), {
         status: 500,
         headers: {
@@ -19250,14 +27020,14 @@ Reply with a command or contact support@funlet.ai with any questions.`;
         let errorMsg = `I didn't understand that. Reply with a crew number`;
         if (hasPagination) {
           if (hasMore && hasPrevious) {
-            errorMsg += `, 'Next' or 'N', 'Prev' or 'P'`;
+            errorMsg += `, 'Next', 'Prev'`;
           } else if (hasMore) {
-            errorMsg += `, 'Next' or 'N'`;
+            errorMsg += `, 'Next'`;
           } else if (hasPrevious) {
-            errorMsg += `, 'Prev' or 'P'`;
+            errorMsg += `, 'Prev'`;
           }
         }
-        errorMsg += `, 'Done' or 'D', 'Create Crew', or 'exit'.`;
+        errorMsg += `, 'Done', 'Create Crew', or 'exit'.`;
         
         responseContent = errorMsg;
         shouldSendSMS = true;
@@ -19287,7 +27057,7 @@ Reply with a command or contact support@funlet.ai with any questions.`;
       } else if (conversationState?.waiting_for === 'manage_event_selection') {
         console.log('User is in manage_event_selection, providing event selection guidance');
         
-        responseContent = `I didn't understand that. Reply with a number (1–5), 'Next' or 'N', 'Prev' or 'P', 'Done' or 'D', or 'exit'.`;
+        responseContent = `I didn't understand that. Reply with a number (1–5), 'Next', 'Prev', 'Done', or 'exit'.`;
         shouldSendSMS = true;
         await sendSMS(phone_number, responseContent, send_sms, phone_number);
         return new Response(JSON.stringify({
@@ -19501,14 +27271,14 @@ Reply with a command or contact support@funlet.ai with any questions.`;
         let errorMsg = `I didn't understand that. Reply with a crew number`;
         if (hasPagination) {
           if (hasMore && hasPrevious) {
-            errorMsg += `, 'Next' or 'N', 'Prev' or 'P'`;
+            errorMsg += `, 'Next', 'Prev'`;
           } else if (hasMore) {
-            errorMsg += `, 'Next' or 'N'`;
+            errorMsg += `, 'Next'`;
           } else if (hasPrevious) {
-            errorMsg += `, 'Prev' or 'P'`;
+            errorMsg += `, 'Prev'`;
           }
         }
-        errorMsg += `, 'Done' or 'D', 'Create Crew', or 'exit'.`;
+        errorMsg += `, 'Done', 'Create Crew', or 'exit'.`;
         
         responseContent = errorMsg;
         shouldSendSMS = true;
@@ -19815,39 +27585,219 @@ Reply with a command or contact support@funlet.ai with any questions.`;
     // Check for sync up response pattern matching first
     const lowerMsg = message.trim().toLowerCase();
     
-    // First check if there's an active sync up for this contact
+    // ===== STEP 1: Query sync_ups upfront to get most recent with created_at =====
     let syncUpId = null;
+    let syncUpCreatedAt: string | null = null;
+    
     if (contactId) {
-      // Check conversation state by phone_number for sync_up_response (we can also check by user_id)
+      // Check conversation state by phone_number for sync_up_response
       if (conversationState && conversationState.waiting_for === 'sync_up_response') {
         console.log(`✅ Found conversation_state with sync_up_response, checking pending...`);
-        
-        // Get sync_up_id from conversation state extracted_data
         syncUpId = conversationState.extracted_data?.[0]?.sync_up_id;
+      }
+      
+      // Query sync_up_responses joined with sync_ups to get created_at timestamp
+      if (syncUpId) {
+        // If we have sync_up_id from conversation_state, get the sync_up details
+        const { data: syncUpDetails } = await supabase
+          .from('sync_ups')
+          .select('id, created_at, status')
+          .eq('id', syncUpId)
+          .in('status', ['active', 'sent'])
+          .maybeSingle();
+        
+        if (syncUpDetails) {
+          syncUpCreatedAt = syncUpDetails.created_at;
+          console.log(`✅ Found sync_up ${syncUpId} with created_at: ${syncUpCreatedAt}`);
+        } else {
+          syncUpId = null; // Sync_up no longer active
+        }
       }
       
       // Fallback: If no sync_up_id from conversation_state, check sync_up_responses directly
       if (!syncUpId) {
         console.log(`⚠️ No sync_up_id in conversation_state, checking sync_up_responses directly...`);
-        const { data: activeSyncUpResponse } = await supabase
+        // First get all sync_up_responses for this contact
+        const { data: allSyncUpResponses, error: responsesError } = await supabase
           .from('sync_up_responses')
-          .select('sync_up_id, sync_ups!inner(id, status)')
-          .eq('contact_id', contactId)
-          .in('sync_ups.status', ['active', 'sent'])
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle();
+          .select('sync_up_id')
+          .eq('contact_id', contactId);
         
-        if (activeSyncUpResponse?.sync_up_id) {
-          syncUpId = activeSyncUpResponse.sync_up_id;
-          console.log(`✅ Found active sync_up from sync_up_responses: ${syncUpId}`);
+        if (allSyncUpResponses && allSyncUpResponses.length > 0) {
+          const syncUpIds = allSyncUpResponses.map(r => r.sync_up_id).filter(Boolean);
+          // Then query sync_ups directly to get status and created_at
+          const { data: activeSyncUps } = await supabase
+            .from('sync_ups')
+            .select('id, created_at, status')
+            .in('id', syncUpIds)
+            .in('status', ['active', 'sent'])
+            .order('created_at', { ascending: false })
+            .limit(1);
+          
+          if (activeSyncUps && activeSyncUps.length > 0) {
+            syncUpId = activeSyncUps[0].id;
+            syncUpCreatedAt = activeSyncUps[0].created_at;
+            console.log(`✅ Found active sync_up from sync_up_responses: ${syncUpId}, created_at: ${syncUpCreatedAt}`);
+          }
         }
       }
     }
     
+    // ===== STEP 2: Query invitations upfront to get most recent with created_at =====
+    let invitations: any[] = [];
+    let mostRecentInvitationCreatedAt: string | null = null;
+    
+    if (contactId) {
+      // Strategy 1: Query with invitee_contact_id
+      const { data: invitationsByInvitee, error: error1 } = await supabase
+        .from('invitations')
+        .select('id, event_id, status, response_note, created_at, invitee_contact_id, contact_id, events!inner(title, creator_id, shorten_calendar_url, status)')
+        .eq('invitee_contact_id', contactId)
+        .eq('events.status', 'active')
+        .order('created_at', { ascending: false })
+        .limit(1);
+      
+      // Strategy 2: Query with contact_id (backward compatibility)
+      const { data: invitationsByContact, error: error2 } = await supabase
+        .from('invitations')
+        .select('id, event_id, status, response_note, created_at, invitee_contact_id, contact_id, events!inner(title, creator_id, shorten_calendar_url, status)')
+        .eq('contact_id', contactId)
+        .is('invitee_contact_id', null)
+        .eq('events.status', 'active')
+        .order('created_at', { ascending: false })
+        .limit(1);
+      
+      // Strategy 3: Query by phone number through contacts (handles cases where multiple contacts share same phone)
+      const { data: allContactsForPhone, error: contactsError } = await supabase
+        .from('contacts')
+        .select('id')
+        .in('phone_number', phoneVariations);
+      
+      const allContactIds = allContactsForPhone?.map(c => c.id) || [];
+      console.log(`📞 Found ${allContactIds.length} contacts for phone ${phone_number}:`, allContactIds);
+      
+      // Query invitations for all contacts with this phone number
+      let invitationsByPhone = [];
+      let error3 = null;
+      if (allContactIds.length > 0) {
+        const { data: invByPhone, error: err3 } = await supabase
+          .from('invitations')
+          .select('id, event_id, status, response_note, created_at, invitee_contact_id, contact_id, events!inner(title, creator_id, shorten_calendar_url, status)')
+          .in('invitee_contact_id', allContactIds)
+          .eq('events.status', 'active')
+          .order('created_at', { ascending: false })
+          .limit(1);
+        
+        const { data: invByPhoneOld, error: err3b } = await supabase
+          .from('invitations')
+          .select('id, event_id, status, response_note, created_at, invitee_contact_id, contact_id, events!inner(title, creator_id, shorten_calendar_url, status)')
+          .in('contact_id', allContactIds)
+          .is('invitee_contact_id', null)
+          .eq('events.status', 'active')
+          .order('created_at', { ascending: false })
+          .limit(1);
+        
+        invitationsByPhone = [
+          ...(invByPhone || []),
+          ...(invByPhoneOld || [])
+        ];
+        error3 = err3 || err3b;
+      }
+      
+      // Combine results and remove duplicates
+      const allInvitations = [
+        ...(invitationsByInvitee || []),
+        ...(invitationsByContact || []),
+        ...invitationsByPhone
+      ].filter((inv, index, self) => 
+        index === self.findIndex(i => i.id === inv.id)
+      );
+      
+      console.log(`🔍 Found ${allInvitations.length} invitations for contact ${contactId}:`, 
+        allInvitations.map(inv => ({ 
+          id: inv.id, 
+          response_note: inv.response_note, 
+          created_at: inv.created_at,
+          invitee_contact_id: inv.invitee_contact_id,
+          contact_id: inv.contact_id,
+          event_status: inv.events?.status 
+        })));
+      
+      // Use all invitations regardless of response status - always get the latest
+      // Sort by created_at descending so invitations[0] is always the most recent
+      invitations = allInvitations.sort((a, b) => {
+          const aTime = new Date(a.created_at || 0).getTime();
+          const bTime = new Date(b.created_at || 0).getTime();
+          return bTime - aTime;
+        });
+      
+      // Get the most recent invitation's created_at timestamp
+      if (invitations.length > 0) {
+        mostRecentInvitationCreatedAt = invitations[0]?.created_at || null;
+        console.log(`📅 Most recent invitation created_at: ${mostRecentInvitationCreatedAt}`);
+      }
+    }
+    
+    // ===== STEP 3: Compare timestamps and determine which to process first =====
+    let processSyncUpFirst = false;
+    let selectedInvitationId: string | null = null;
+    let selectedSyncUpId: string | null = null;
+    
+    if (syncUpId && syncUpCreatedAt) {
+      if (mostRecentInvitationCreatedAt) {
+        // Both exist - compare timestamps
+        const syncUpTime = new Date(syncUpCreatedAt).getTime();
+        const invitationTime = new Date(mostRecentInvitationCreatedAt).getTime();
+        
+        if (syncUpTime > invitationTime) {
+          processSyncUpFirst = true;
+          selectedSyncUpId = syncUpId;
+          console.log(`⏰ Sync_up is more recent (${syncUpCreatedAt} vs ${mostRecentInvitationCreatedAt}), processing sync_up first`);
+        } else if (syncUpTime < invitationTime) {
+          processSyncUpFirst = false;
+          selectedInvitationId = invitations[0]?.id || null;
+          console.log(`⏰ Invitation is more recent (${mostRecentInvitationCreatedAt} vs ${syncUpCreatedAt}), processing invitation first`);
+        } else {
+          // Equal timestamps - default to sync_up first for backward compatibility
+          processSyncUpFirst = true;
+          selectedSyncUpId = syncUpId;
+          console.log(`⏰ Equal timestamps, defaulting to sync_up first for backward compatibility`);
+        }
+      } else {
+        // Only sync_up exists
+        processSyncUpFirst = true;
+        selectedSyncUpId = syncUpId;
+        console.log(`⏰ Only sync_up exists, processing sync_up`);
+      }
+    } else if (mostRecentInvitationCreatedAt && invitations.length > 0) {
+      // Only invitation exists (or sync_up invalid)
+      processSyncUpFirst = false;
+      selectedInvitationId = invitations[0]?.id || null;
+      console.log(`⏰ Only invitation exists (or sync_up invalid), processing invitation`);
+    } else {
+      // Neither exists or both invalid
+      processSyncUpFirst = false;
+      console.log(`⏰ Neither sync_up nor invitation exists, continuing to other workflows`);
+    }
+    
     // If there's an active sync up, process the response (valid or invalid)
-    if (syncUpId) {
+    if (syncUpId && processSyncUpFirst) {
       console.log(`🔍 SYNC_UP_RESPONSE handler triggered for phone: ${phone_number}, sync_up_id: ${syncUpId}`);
+      
+      // Log workflow start
+      await logWorkflowStart({
+        supabase,
+        userId: null,
+        workflowName: 'sync_up_response',
+        workflowStep: 'initiated',
+        contactId,
+        syncUpId,
+        metadata: {
+          phone_number: phone_number,
+          sync_up_id: syncUpId,
+          user_message: message
+        }
+      });
       
       // Allow multiple options (1, 2, 3, 12, 23, 123, 1 2, 1 2 3, etc.) or "none" variations
       const isValidSyncUpReply = /^none(?:\s+of\s+(these|those|them))?$/.test(lowerMsg) || 
@@ -19860,6 +27810,23 @@ Reply with a command or contact support@funlet.ai with any questions.`;
         responseContent = `I didn't understand that. Reply with numbers (e.g. '1 2') or 'none'.`;
         shouldSendSMS = true;
         await sendSMS(phone_number, responseContent, send_sms, phone_number);
+        
+        // Log invalid response
+        await logWorkflowProgress({
+          supabase,
+          userId: null,
+          workflowName: 'sync_up_response',
+          workflowStep: 'response_invalid',
+          executionStatus: 'success',
+          contactId,
+          syncUpId,
+          metadata: {
+            phone_number: phone_number,
+            user_message: message,
+            sync_up_id: syncUpId,
+            error: 'invalid_pattern'
+          }
+        });
         
         return new Response(JSON.stringify({
           success: true,
@@ -19900,6 +27867,24 @@ Reply with a command or contact support@funlet.ai with any questions.`;
         
         if (createResponseError) {
           console.error(`❌ Error creating sync_up_responses:`, createResponseError);
+          // Log error creating sync_up_responses
+          await logWorkflowError({
+            supabase,
+            userId: null,
+            workflowName: 'sync_up_response',
+            workflowStep: 'response_create_error',
+            contactId,
+            syncUpId,
+            errorDetails: {
+              error_message: createResponseError.message,
+              error_code: createResponseError.code
+            },
+            metadata: {
+              phone_number: phone_number,
+              sync_up_id: syncUpId,
+              contact_id: contactId
+            }
+          });
         }
       }
 
@@ -19910,6 +27895,23 @@ Reply with a command or contact support@funlet.ai with any questions.`;
         // Process sync up response
         console.log(`✅ Processing sync up response for contact ${contactId}, sync_up_id: ${syncUpId}`);
         
+        // Log response detection
+        await logWorkflowProgress({
+          supabase,
+          userId: null,
+          workflowName: 'sync_up_response',
+          workflowStep: 'response_detected',
+          executionStatus: 'success',
+          contactId,
+          syncUpId,
+          metadata: {
+            phone_number: phone_number,
+            user_message: message,
+            sync_up_id: syncUpId,
+            contact_id: contactId
+          }
+        });
+        
         // Get sync up options
         const { data: optionRows } = await supabase
           .from('sync_up_options')
@@ -19919,6 +27921,22 @@ Reply with a command or contact support@funlet.ai with any questions.`;
           .order('idx');
         
         if (optionRows && optionRows.length > 0) {
+          // Log options loaded
+          await logWorkflowProgress({
+            supabase,
+            userId: null,
+            workflowName: 'sync_up_response',
+            workflowStep: 'options_loaded',
+            executionStatus: 'success',
+            contactId,
+            syncUpId,
+            metadata: {
+              phone_number: phone_number,
+              sync_up_id: syncUpId,
+              options_count: optionRows.length,
+              max_idx: optionRows.length
+            }
+          });
           const maxIdx = optionRows.length;
           let selectedIdxs: number[] = [];
           let isNone = false;
@@ -19966,6 +27984,24 @@ Reply with a command or contact support@funlet.ai with any questions.`;
               shouldSendSMS = true;
               await sendSMS(phone_number, responseContent, send_sms, phone_number);
               
+              // Log validation failure
+              await logWorkflowProgress({
+                supabase,
+                userId: null,
+                workflowName: 'sync_up_response',
+                workflowStep: 'response_validation_failed',
+                executionStatus: 'success',
+                contactId,
+                syncUpId,
+                metadata: {
+                  phone_number: phone_number,
+                  user_message: message,
+                  sync_up_id: syncUpId,
+                  selected_idxs: selectedIdxs,
+                  error: 'no_valid_selection'
+                }
+              });
+              
               return new Response(JSON.stringify({
                 success: true,
                 action: 'SYNC_UP_RESPONSE_INVALID',
@@ -19982,6 +28018,25 @@ Reply with a command or contact support@funlet.ai with any questions.`;
             responseContent = `I didn't understand that. Reply with numbers (e.g. '1 2') or 'none'.`;
             shouldSendSMS = true;
             await sendSMS(phone_number, responseContent, send_sms, phone_number);
+            
+            // Log validation failure (out of range)
+            await logWorkflowProgress({
+              supabase,
+              userId: null,
+              workflowName: 'sync_up_response',
+              workflowStep: 'response_validation_failed',
+              executionStatus: 'success',
+              contactId,
+              syncUpId,
+              metadata: {
+                phone_number: phone_number,
+                user_message: message,
+                sync_up_id: syncUpId,
+                selected_idxs: selectedIdxs,
+                max_idx: maxIdx,
+                error: 'out_of_range'
+              }
+            });
             
             return new Response(JSON.stringify({
               success: true,
@@ -20029,14 +28084,81 @@ Reply with a command or contact support@funlet.ai with any questions.`;
               onConflict: 'contact_id,sync_up_id'
             });
           
-          // Clear conversation_state waiting_for to reset the crew member's state
-          await supabase
-            .from('conversation_state')
-            .delete()
-            .in('phone_number', phoneVariations);
+          // Log response saved
+          await logWorkflowProgress({
+            supabase,
+            userId: null,
+            workflowName: 'sync_up_response',
+            workflowStep: 'response_saved',
+            executionStatus: 'success',
+            contactId,
+            syncUpId,
+            metadata: {
+              phone_number: phone_number,
+              sync_up_id: syncUpId,
+              contact_id: contactId,
+              selected_option_ids: selectedOptionIds,
+              option_idxs: selectedIdxs,
+              response_type: isNone ? 'none' : 'selected',
+              is_none: isNone
+            }
+          });
+          
+          // Reset crew member's conversation state to idle (update instead of delete)
+          // Note: Using update for each phone variation since upsert doesn't support .in()
+          for (const phoneVar of phoneVariations) {
+            await supabase
+              .from('conversation_state')
+              .upsert({
+                phone_number: phoneVar,
+                current_state: 'idle',
+                waiting_for: null,
+                extracted_data: [],
+                last_action: 'SYNC_UP_RESPONSE_COMPLETED',
+                last_action_timestamp: new Date().toISOString(),
+                updated_at: new Date().toISOString()
+              }, {
+                onConflict: 'phone_number'
+              });
+          }
           
           responseContent = 'Got it, thanks!';
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
+          
+          // Log confirmation sent
+          await logWorkflowProgress({
+            supabase,
+            userId: null,
+            workflowName: 'sync_up_response',
+            workflowStep: 'confirmation_sent',
+            executionStatus: 'success',
+            contactId,
+            syncUpId,
+            metadata: {
+              phone_number: phone_number,
+              sync_up_id: syncUpId,
+              contact_id: contactId
+            }
+          });
+          
+          // Log workflow complete
+          await logWorkflowComplete({
+            supabase,
+            userId: null,
+            workflowName: 'sync_up_response',
+            workflowStep: 'completed',
+            executionStatus: 'success',
+            contactId,
+            syncUpId,
+            metadata: {
+              phone_number: phone_number,
+              sync_up_id: syncUpId,
+              contact_id: contactId,
+              selected_option_ids: selectedOptionIds,
+              response_type: isNone ? 'none' : 'selected'
+            }
+          });
+          
           return new Response(JSON.stringify({ 
             success: true, 
             action: 'SYNC_UP_RESPONSE', 
@@ -20049,6 +28171,24 @@ Reply with a command or contact support@funlet.ai with any questions.`;
           responseContent = 'No time options found for this sync up.';
           shouldSendSMS = true;
           await sendSMS(phone_number, responseContent, send_sms, phone_number);
+          
+          // Log no options found error
+          await logWorkflowError({
+            supabase,
+            userId: null,
+            workflowName: 'sync_up_response',
+            workflowStep: 'no_options_found',
+            contactId,
+            syncUpId,
+            errorDetails: {
+              error: 'no_options'
+            },
+            metadata: {
+              phone_number: phone_number,
+              sync_up_id: syncUpId
+            }
+          });
+          
           return new Response(JSON.stringify({
             success: true,
             action: 'SYNC_UP_RESPONSE_NO_OPTIONS',
@@ -20060,137 +28200,70 @@ Reply with a command or contact support@funlet.ai with any questions.`;
       }
     }
     
-    // Load conversation state for RSVP flow (by phone) - normalize and pick latest relevant
-
-    // If waiting to select an event for RSVP, handle numeric selection now
-    if (conversationState?.waiting_for === 'event_select') {
-      const numericMatch = message.trim().match(/^([1-9][0-9]*)$/);
-      // Find event list from extracted_data
-      const eventListItem = (conversationState.extracted_data || []).find((x: any) => x?.action === 'RSVP_EVENT_LIST');
-      const eventList = eventListItem?.event_list || [];
-      if (!numericMatch || eventList.length === 0) {
-        // Re-prompt with the list
-        let eventListMsg = 'You have multiple event invitations. Which one are you responding to?\n\n';
-        eventList.forEach((e: any, index: number) => {
-          eventListMsg += `${index + 1}. ${e.title}\n`;
-        });
-        eventListMsg += '\nReply with the number of your choice.';
-        await sendSMS(phone_number, eventListMsg, send_sms, phone_number);
-        return new Response(JSON.stringify({ success: true, action: 'RSVP_EVENT_SELECT_PROMPT', message: eventListMsg }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-      }
-
-      const idx = parseInt(numericMatch[1], 10) - 1;
-      if (idx < 0 || idx >= eventList.length) {
-        let eventListMsg = 'Please choose a valid number from the list:\n\n';
-        eventList.forEach((e: any, index: number) => {
-          eventListMsg += `${index + 1}. ${e.title}\n`;
-        });
-        await sendSMS(phone_number, eventListMsg, send_sms, phone_number);
-        return new Response(JSON.stringify({ success: true, action: 'RSVP_EVENT_SELECT_INVALID', message: eventListMsg }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-      }
-
-      const selected = eventList[idx];
-      // Update existing RSVP state for this phone
-      try {
-        const normalizedPhone = (phone_number || '').replace(/\D/g, '');
-        console.log('DEBUG: Updating RSVP conversation state for phone:', normalizedPhone);
-
-        const { data: updateResult, error: updateError } = await supabase
-          .from('conversation_state')
-          .update({
-            waiting_for: 'rsvp',
-            current_state: 'rsvp_flow',
-            extracted_data: [
-              ...(conversationState?.extracted_data || []).filter((x: any) => x?.action !== 'RSVP_SELECTED_INVITATION'),
-              { action: 'RSVP_SELECTED_INVITATION', invitation_id: selected.id }
-            ]
-          })
-          .eq('phone_number', normalizedPhone)
-          .select('id');
-
-        console.log('DEBUG: RSVP update result:', { updateResult, updateError });
-
-        if (updateError) {
-          console.error('DEBUG: Failed to update RSVP conversation state:', updateError);
-        }
-      } catch (error) {
-        console.error('DEBUG: Exception in RSVP conversation state update:', error);
-      }
-
-      const prompt = 'Reply 1=Yes, 2=Maybe, 3=No';
-      await sendSMS(phone_number, prompt, send_sms, phone_number);
-      return new Response(JSON.stringify({ success: true, action: 'RSVP_CHOICE_PROMPT', message: prompt }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-    }
 
     // Check for RSVP response pattern (in, out, maybe)
-    const isRsvpResponse = /^(in|out|maybe|1|2|3)$/i.test(lowerMsg);
+    // Only process RSVP if sync_up wasn't processed first
+    // If processSyncUpFirst is true, sync_up block will handle it (or return error), so skip RSVP
+    const isRsvpResponse = /^(in|out|maybe|yes|y|no|n|1|2|3)$/i.test(lowerMsg);
     
-    if (isRsvpResponse) {
+    if (isRsvpResponse && !processSyncUpFirst) {
       console.log(`📝 RSVP response detected from crew member: ${lowerMsg}`);
       
       // Map response to status
       let rsvpStatus = '';
-      if (lowerMsg === 'in' || lowerMsg === '1') {
+      if (lowerMsg === 'in' || lowerMsg === 'yes' || lowerMsg === 'y' || lowerMsg === '1') {
         rsvpStatus = 'in';
-      } else if (lowerMsg === 'out' || lowerMsg === '2') {
+      } else if (lowerMsg === 'out' || lowerMsg === 'no' || lowerMsg === 'n' || lowerMsg === '2') {
         rsvpStatus = 'out';
       } else if (lowerMsg === 'maybe' || lowerMsg === '3') {
         rsvpStatus = 'maybe';
       }
       
-      // If we already have a selected invitation in state, use it directly
-      if (conversationState?.waiting_for === 'rsvp') {
-        const selItem = (conversationState.extracted_data || []).find((x: any) => x?.action === 'RSVP_SELECTED_INVITATION');
-        const selectedInvitationId = selItem?.invitation_id;
-        if (selectedInvitationId) {
-          const { data: inv, error: invLoadErr } = await supabase
-            .from('invitations')
-            .select('id, event_id, status, events!inner(title, creator_id, shorten_calendar_url)')
-            .eq('id', selectedInvitationId)
-            .single();
-          if (!invLoadErr && inv) {
-            const { error: updateError } = await supabase
-              .from('invitations')
-              .update({
-                response_note: rsvpStatus,
-                responded_at: new Date().toISOString(),
-                updated_at: new Date().toISOString()
-              })
-              .eq('id', selectedInvitationId);
-            if (!updateError) {
-              // Clear conversation state for this phone (normalize variations)
-              try {
-                const normalizedPhone = (phone_number || '').replace(/\D/g, '');
-                const phoneVariations = [normalizedPhone];
-                if (normalizedPhone.length === 11 && normalizedPhone.startsWith('1')) {
-                  phoneVariations.push(normalizedPhone.substring(1));
-                }
-                await supabase.from('conversation_state').delete().in('phone_number', phoneVariations);
-              } catch (_) {}
-              const calendarLink = inv.events.shorten_calendar_url ? `\nAdd to calendar: ${inv.events.shorten_calendar_url}` : '';
-              const confirmationMsg = rsvpStatus === 'in'
-                ? `Great! You're in for ${inv.events.title}! 🎉${calendarLink}`
-                : rsvpStatus === 'out'
-                ? `Got it, you're out for ${inv.events.title}. Maybe next time!`
-                : `Noted! You're a maybe for ${inv.events.title}. Let us know when you decide!${calendarLink}`;
-              await sendSMS(phone_number, confirmationMsg, send_sms, phone_number);
-              return new Response(JSON.stringify({
-                success: true,
-                action: 'RSVP_RESPONSE',
-                rsvp_status: rsvpStatus,
-                event_title: inv.events.title,
-                message: confirmationMsg
-              }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-            }
-          }
+      // Log workflow start
+      await logWorkflowStart({
+        supabase,
+        userId: null,
+        workflowName: 'rsvp_response',
+        workflowStep: 'initiated',
+        contactId,
+        metadata: {
+          phone_number: phone_number,
+          user_message: message,
+          rsvp_status: rsvpStatus
         }
-        // If anything fails, fall through to original lookup logic
-      }
+      });
       
-      console.log(`🔍 Looking for invitation using contact_id:`, contactId);
+      // Log RSVP response detected
+      await logWorkflowProgress({
+        supabase,
+        userId: null,
+        workflowName: 'rsvp_response',
+        workflowStep: 'rsvp_response_detected',
+        executionStatus: 'success',
+        contactId,
+        metadata: {
+          phone_number: phone_number,
+          user_message: message,
+          rsvp_status: rsvpStatus
+        }
+      });
       
+      // Use the selected invitation ID from comparison section, or fall back to latest invitation
       if (!contactId) {
         console.log(`❌ No contact found, cannot look up invitation`);
+        
+        // Log no contact found
+        await logWorkflowProgress({
+          supabase,
+          userId: null,
+          workflowName: 'rsvp_response',
+          workflowStep: 'rsvp_no_contact_found',
+          executionStatus: 'success',
+          metadata: {
+            phone_number: phone_number
+          }
+        });
+        
         return new Response(JSON.stringify({
           success: true,
           action: 'RSVP_RESPONSE_NO_CONTACT',
@@ -20200,100 +28273,78 @@ Reply with a command or contact support@funlet.ai with any questions.`;
         });
       }
       
-      // Find the invitation for this contact
-      const { data: invitations, error: invError } = await supabase
-        .from('invitations')
-        .select('id, event_id, status, events!inner(title, creator_id, shorten_calendar_url)')
-        .eq('contact_id', contactId)
-        .eq('events.status', 'active')
-        .eq('response_note', 'no_response')
-        .order('created_at', { ascending: false });
-      
-      if (invError) {
-        console.error(`❌ Error finding invitation:`, invError);
-        return new Response(JSON.stringify({
-          success: false,
-          error: 'Failed to find invitation'
-        }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
-      }
-      
       if (!invitations || invitations.length === 0) {
-        console.log(`❌ No active invitations found for phone: ${phone_number}`);
+        console.log(`❌ No active invitations found for phone: ${phone_number}, contact: ${contactId}`);
+        
+        // Log no invitation found
+        await logWorkflowProgress({
+          supabase,
+          userId: null,
+          workflowName: 'rsvp_response',
+          workflowStep: 'rsvp_no_invitation_found',
+          executionStatus: 'success',
+          invitee_contact_id: contactId,
+          metadata: {
+            phone_number: phone_number,
+            contact_id: contactId,
+            invitation_count: 0
+          }
+        });
+        
+        // Send SMS response to user
+        const noInvitationMsg = 'No active event invitations found. Please ask the host to send you an invitation.';
+        await sendSMS(phone_number, noInvitationMsg, send_sms, phone_number);
+        
         return new Response(JSON.stringify({
           success: true,
           action: 'RSVP_RESPONSE_NO_INVITATION',
-          message: 'No active event invitations found. Please ask the host to send you an invitation.'
+          message: noInvitationMsg
         }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         });
       }
       
-      // If multiple invitations, prompt for event selection and set conversation state
-      if (invitations.length > 1) {
-        const eventList = invitations.map(inv => ({ id: inv.id, title: inv.events.title }));
-        let eventListMsg = 'You have multiple event invitations. Which one are you responding to?\n\n';
-        eventList.forEach((e, index) => {
-          eventListMsg += `${index + 1}. ${e.title}\n`;
-        });
-        eventListMsg += '\nReply with the number of your choice.';
-
-        // Insert new state for this phone only if empty
-        try {
-          const normalizedPhone = (phone_number || '').replace(/\D/g, '');
-          console.log('DEBUG: Checking if conversation state exists for phone:', normalizedPhone);
-
-          // Check if state already exists
-          const { data: existingState } = await supabase
-            .from('conversation_state')
-            .select('id')
-            .eq('phone_number', normalizedPhone)
-            .limit(1);
-
-          if (!existingState || existingState.length === 0) {
-            console.log('DEBUG: No existing state found, inserting new conversation state');
-
-            const { data: insertResult, error: insertError } = await supabase
-              .from('conversation_state')
-              .insert({
-                user_id: null,
-                phone_number: normalizedPhone,
-                waiting_for: 'event_select',
-                current_state: 'rsvp_flow',
-                extracted_data: [ { action: 'RSVP_EVENT_LIST', event_list: eventList } ]
-              })
-              .select('id');
-
-            console.log('DEBUG: Insert result:', { insertResult, insertError });
-
-            if (insertError) {
-              console.error('DEBUG: Failed to insert conversation state:', insertError);
-              // Return error response to debug
-              return new Response(JSON.stringify({
-                success: false,
-                error: 'Failed to save conversation state',
-                details: insertError.message,
-                phone: normalizedPhone
-              }), {
-                status: 500,
-                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-              });
-            }
-          } else {
-            console.log('DEBUG: Conversation state already exists for phone, skipping insert');
-          }
-        } catch (error) {
-          console.error('DEBUG: Exception in conversation state insert:', error);
-        }
-
-        await sendSMS(phone_number, eventListMsg, send_sms, phone_number);
-        return new Response(JSON.stringify({ success: true, action: 'RSVP_EVENT_SELECT_PROMPT', message: eventListMsg, event_count: invitations.length }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-      }
-      
-      // Use the most recent invitation
-      const invitation = invitations[0];
+      // Always use the most recent invitation (already sorted by created_at descending)
+      // Use selectedInvitationId if available from comparison, otherwise use invitations[0]
+      const invitation = selectedInvitationId 
+        ? invitations.find(inv => inv.id === selectedInvitationId) || invitations[0]
+        : invitations[0];
       console.log(`✅ Found invitation: ${invitation.id} for event: ${invitation.events.title}`);
+      
+      // Log single invitation found
+      await logWorkflowProgress({
+        supabase,
+        userId: null,
+        workflowName: 'rsvp_response',
+        workflowStep: 'rsvp_single_invitation_found',
+        executionStatus: 'success',
+        invitee_contact_id: contactId,
+        metadata: {
+          phone_number: phone_number,
+          contact_id: contactId,
+          invitation_id: invitation.id,
+          event_id: invitation.event_id,
+          event_title: invitation.events.title
+        }
+      });
+      
+      // Log invitation update initiated
+      await logWorkflowProgress({
+        supabase,
+        userId: null,
+        workflowName: 'rsvp_response',
+        workflowStep: 'rsvp_invitation_update_initiated',
+        executionStatus: 'success',
+        invitee_contact_id: contactId,
+        metadata: {
+          phone_number: phone_number,
+          contact_id: contactId,
+          invitation_id: invitation.id,
+          event_id: invitation.event_id,
+          event_title: invitation.events.title,
+          rsvp_status: rsvpStatus
+        }
+      });
       
       // Update the invitation with response (only response_note and responded_at, NOT status)
       const { error: updateError } = await supabase
@@ -20307,6 +28358,29 @@ Reply with a command or contact support@funlet.ai with any questions.`;
       
       if (updateError) {
         console.error(`❌ Error updating invitation:`, updateError);
+        
+        // Log invitation update error
+        await logWorkflowError({
+          supabase,
+          userId: null,
+          workflowName: 'rsvp_response',
+          workflowStep: 'rsvp_invitation_update_error',
+          invitee_contact_id: contactId,
+          errorDetails: {
+            error_message: updateError.message,
+            phone_number: phone_number,
+            invitation_id: invitation.id
+          },
+          metadata: {
+            phone_number: phone_number,
+            contact_id: contactId,
+            invitation_id: invitation.id,
+            event_id: invitation.event_id,
+            event_title: invitation.events.title,
+            rsvp_status: rsvpStatus
+          }
+        });
+        
         return new Response(JSON.stringify({
           success: false,
           error: 'Failed to update RSVP'
@@ -20316,6 +28390,24 @@ Reply with a command or contact support@funlet.ai with any questions.`;
       }
       
       console.log(`✅ Invitation updated successfully with response: ${rsvpStatus}`);
+      
+      // Log invitation update success
+      await logWorkflowProgress({
+        supabase,
+        userId: null,
+        workflowName: 'rsvp_response',
+        workflowStep: 'rsvp_invitation_update_success',
+        executionStatus: 'success',
+        invitee_contact_id: contactId,
+        metadata: {
+          phone_number: phone_number,
+          contact_id: contactId,
+          invitation_id: invitation.id,
+          event_id: invitation.event_id,
+          event_title: invitation.events.title,
+          rsvp_status: rsvpStatus
+        }
+      });
       
       // Send confirmation SMS
       const calendarLink = invitation.events.shorten_calendar_url ? `\nAdd to calendar: ${invitation.events.shorten_calendar_url}` : '';
@@ -20329,6 +28421,44 @@ Reply with a command or contact support@funlet.ai with any questions.`;
       }
       
       await sendSMS(phone_number, confirmationMsg, send_sms, phone_number);
+      
+      // Log confirmation sent
+      await logWorkflowProgress({
+        supabase,
+        userId: null,
+        workflowName: 'rsvp_response',
+        workflowStep: 'rsvp_confirmation_sent',
+        executionStatus: 'success',
+        invitee_contact_id: contactId,
+        metadata: {
+          phone_number: phone_number,
+          contact_id: contactId,
+          invitation_id: invitation.id,
+          event_id: invitation.event_id,
+          event_title: invitation.events.title,
+          rsvp_status: rsvpStatus,
+          has_calendar_link: !!invitation.events.shorten_calendar_url
+        }
+      });
+      
+      // Log workflow completion
+      await logWorkflowComplete({
+        supabase,
+        userId: null,
+        workflowName: 'rsvp_response',
+        workflowStep: 'rsvp_completed',
+        executionStatus: 'success',
+        invitee_contact_id: contactId,
+        metadata: {
+          phone_number: phone_number,
+          contact_id: contactId,
+          invitation_id: invitation.id,
+          event_id: invitation.event_id,
+          event_title: invitation.events.title,
+          rsvp_status: rsvpStatus,
+          has_calendar_link: !!invitation.events.shorten_calendar_url
+        }
+      });
       
       return new Response(JSON.stringify({
         success: true,
@@ -20361,6 +28491,27 @@ Reply with a command or contact support@funlet.ai with any questions.`;
 
   } catch (error) {
     console.error(`❌ [${Date.now() - startTime}ms] SMS Handler Error:`, error);
+    
+    // Try to log the error - create supabase client if needed
+    try {
+      const supabase = createClient(
+        Deno.env.get('SUPABASE_URL'),
+        Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+      );
+      await logError({
+        supabase,
+        userId: null,
+        workflowName: 'sms_handler',
+        workflowStep: 'main_handler_error',
+        error: error,
+        metadata: {
+          duration_ms: Date.now() - startTime
+        }
+      });
+    } catch (logErr) {
+      console.error('Failed to log error:', logErr);
+    }
+    
     return new Response(JSON.stringify({
       error: 'Internal server error',
       details: error.message

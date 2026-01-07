@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pattern Matching, Logger, and Analytics: Quick Reference</title>
+    <style>
+        @page {
+            margin: 2cm;
+            size: A4;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: #fff;
+            padding: 40px;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            color: #1a1a1a;
+            font-size: 2.5em;
+            margin-bottom: 0.5em;
+            padding-bottom: 0.3em;
+            border-bottom: 4px solid #4a90e2;
+            font-weight: 700;
+        }
+        
+        h2 {
+            color: #2c3e50;
+            font-size: 1.8em;
+            margin-top: 2em;
+            margin-bottom: 1em;
+            padding-bottom: 0.3em;
+            border-bottom: 2px solid #e0e0e0;
+            font-weight: 600;
+        }
+        
+        h3 {
+            color: #34495e;
+            font-size: 1.4em;
+            margin-top: 1.5em;
+            margin-bottom: 0.8em;
+            font-weight: 600;
+        }
+        
+        h4 {
+            color: #555;
+            font-size: 1.2em;
+            margin-top: 1.2em;
+            margin-bottom: 0.6em;
+            font-weight: 600;
+        }
+        
+        p {
+            margin-bottom: 1em;
+            text-align: justify;
+        }
+        
+        ul, ol {
+            margin-left: 2em;
+            margin-bottom: 1.2em;
+        }
+        
+        li {
+            margin-bottom: 0.6em;
+            line-height: 1.7;
+        }
+        
+        strong {
+            color: #2c3e50;
+            font-weight: 600;
+        }
+        
+        code {
+            background: #f5f5f5;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.9em;
+            color: #e83e8c;
+        }
+        
+        pre {
+            background: #f8f9fa;
+            border: 1px solid #e0e0e0;
+            border-left: 4px solid #4a90e2;
+            padding: 1.2em;
+            border-radius: 5px;
+            overflow-x: auto;
+            margin: 1.5em 0;
+            page-break-inside: avoid;
+        }
+        
+        pre code {
+            background: none;
+            padding: 0;
+            color: #333;
+            font-size: 0.9em;
+        }
+        
+        hr {
+            border: none;
+            border-top: 2px solid #e0e0e0;
+            margin: 2em 0;
+        }
+        
+        a {
+            color: #4a90e2;
+            text-decoration: none;
+            word-break: break-all;
+        }
+        
+        a:hover {
+            text-decoration: underline;
+        }
+        
+        .highlight-box {
+            background: #f0f7ff;
+            border-left: 4px solid #4a90e2;
+            padding: 1em 1.5em;
+            margin: 1.5em 0;
+            border-radius: 4px;
+        }
+        
+        .info-box {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 1em 1.5em;
+            margin: 1.5em 0;
+            border-radius: 4px;
+        }
+        
+        .success-box {
+            background: #d4edda;
+            border-left: 4px solid #28a745;
+            padding: 1em 1.5em;
+            margin: 1.5em 0;
+            border-radius: 4px;
+        }
+        
+        .warning-box {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 1em 1.5em;
+            margin: 1.5em 0;
+            border-radius: 4px;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.5em 0;
+            page-break-inside: avoid;
+        }
+        
+        th, td {
+            padding: 0.8em;
+            text-align: left;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #2c3e50;
+        }
+        
+        .section-number {
+            color: #4a90e2;
+            font-weight: 600;
+        }
+        
+        @media print {
+            body {
+                padding: 0;
+            }
+            
+            h1, h2, h3 {
+                page-break-after: avoid;
+            }
+            
+            pre, table {
+                page-break-inside: avoid;
+            }
+        }
+    </style>
+</head>
+<body>
+    <h1>Pattern Matching, Logger, and Analytics: Quick Reference</h1>
+    
+    <h2>System Overview</h2>
+    <p>Three-layer architecture:</p>
+    <ol>
+        <li><strong>Pattern Matching</strong> - Fast command recognition (bypasses AI)</li>
+        <li><strong>Logger</strong> - Event tracking (non-blocking)</li>
+        <li><strong>Analytics</strong> - Insights from logs (SQL views)</li>
+    </ol>
+    <p><strong>Data Flow</strong>: SMS → Pattern Match → Action → Log → Database → Analytics Views</p>
+    
+    <hr>
+    
+    <h2>Pattern Matching</h2>
+    
+    <h3>How It Works</h3>
+    <ul>
+        <li>Runs <strong>before AI</strong> to catch common commands</li>
+        <li>Uses regex patterns and state-aware matching</li>
+        <li>Extracts structured data (names, numbers, dates)</li>
+        <li>Returns action + extracted data, or null (triggers AI)</li>
+    </ul>
+    
+    <h3>Pattern Types</h3>
+    <ol>
+        <li><strong>Global Commands</strong>: RESET, EXIT (highest priority)</li>
+        <li><strong>State-Aware</strong>: Menu selections, field editing (based on <code>waiting_for</code>)</li>
+        <li><strong>Regex Patterns</strong>: "create crew", "check rsvps", "add member"</li>
+        <li><strong>Natural Language</strong>: "can I create a crew?", "my group is X"</li>
+    </ol>
+    
+    <h3>Priority Order</h3>
+    <ol>
+        <li>Message validation</li>
+        <li>Global commands (RESET, EXIT)</li>
+        <li>State-specific patterns</li>
+        <li>Context-aware patterns</li>
+        <li>General patterns</li>
+        <li>Fallback to AI</li>
+    </ol>
+    
+    <h3>Benefits</h3>
+    <ul>
+        <li><strong>Latency</strong>: &lt; 10ms (vs AI ~500ms)</li>
+        <li><strong>Cost</strong>: Bypasses AI for 90% of commands</li>
+        <li><strong>Reliability</strong>: Deterministic for recognized patterns</li>
+    </ul>
+    
+    <hr>
+    
+    <h2>Logger</h2>
+    
+    <h3>How It Works</h3>
+    <ul>
+        <li><strong>Fire-and-forget</strong>: Uses <code>EdgeRuntime.waitUntil()</code> (non-blocking)</li>
+        <li><strong>Structured</strong>: All logs follow <code>LogParams</code> interface</li>
+        <li><strong>PII Compliant</strong>: No message bodies, only phone numbers already in system</li>
+    </ul>
+    
+    <h3>Event Types</h3>
+    <ul>
+        <li><strong>Organizer Events</strong>: <code>flow_started</code>, <code>crew_created</code>, <code>event_created</code>, <code>reminder_sent</code>, etc.</li>
+        <li><strong>Invitee Events</strong>: <code>invite_sent</code>, <code>invitee_reply_yes/no/unknown</code>, <code>invitee_vote</code></li>
+        <li><strong>System Events</strong>: <code>sms_sent</code>, <code>sms_received</code>, <code>error</code></li>
+    </ul>
+    
+    <h3>Data Structure</h3>
+    <ul>
+        <li><strong>Columns</strong>: <code>organizer_id</code>, <code>event_type</code>, <code>crew_id</code>, <code>event_id</code>, <code>sync_up_id</code>, <code>invitee_contact_id</code>, <code>workflow_name</code>, <code>workflow_step</code>, <code>timestamp</code></li>
+        <li><strong>JSONB Metadata</strong>: <code>input_data</code>, <code>output_data</code>, <code>error_details</code>, enriched relational IDs</li>
+    </ul>
+    
+    <h3>Setup</h3>
+    <ul>
+        <li>Already integrated in <code>supabase/functions/funlet-sms-handler-v2/logger.ts</code></li>
+        <li>Requires <code>behavioral_logs</code> table in database</li>
+        <li>No additional configuration needed</li>
+    </ul>
+    
+    <h3>Key Features</h3>
+    <ul>
+        <li>Never blocks main request</li>
+        <li>Never throws errors (graceful degradation)</li>
+        <li>Automatically enriches metadata with relational IDs</li>
+        <li>Version 1, platform 'sms'</li>
+    </ul>
+    
+    <hr>
+    
+    <h2>Analytics</h2>
+    
+    <h3>How It Works</h3>
+    <ul>
+        <li><strong>SQL Views</strong>: Pre-computed queries on <code>behavioral_logs</code> table</li>
+        <li><strong>Real-Time</strong>: Views computed on-demand (always up-to-date)</li>
+        <li><strong>No Additional Storage</strong>: Everything derived from logs</li>
+    </ul>
+    
+    <h3>Setup (One-Time)</h3>
+    <div class="info-box">
+        <p><strong>Already Set Up</strong>: The analytics views are already configured in Supabase SQL Editor:</p>
+        <ol>
+            <li><strong>"Setup Behavioral Logs Analytics Views & Indexes"</strong> - Contains the setup SQL
+                <ul>
+                    <li>Run this file once to create all views and indexes</li>
+                    <li>Creates 15+ analytics views and 7 performance indexes</li>
+                </ul>
+                <p><a href="https://supabase.com/dashboard/project/jjkduivjlzazcvdeeqde/sql/b2cff120-66c1-49ad-aebb-b9452ac98fc7">https://supabase.com/dashboard/project/jjkduivjlzazcvdeeqde/sql/b2cff120-66c1-49ad-aebb-b9452ac98fc7</a></p>
+            </li>
+            <li><strong>"Funlet Analytics Dashboard"</strong> - Contains all query examples
+                <ul>
+                    <li>Ready-to-use queries for all analytics views</li>
+                    <li>Can run individual queries or sections as needed</li>
+                </ul>
+                <p><a href="https://supabase.com/dashboard/project/jjkduivjlzazcvdeeqde/sql/b4454f09-314f-44c1-af46-8447c63e051b">https://supabase.com/dashboard/project/jjkduivjlzazcvdeeqde/sql/b4454f09-314f-44c1-af46-8447c63e051b</a></p>
+            </li>
+        </ol>
+    </div>
+    
+    <p><strong>To Use</strong>:</p>
+    <ol>
+        <li>Open Supabase Dashboard → SQL Editor</li>
+        <li>Find "Setup Behavioral Logs Analytics Views & Indexes" (if not run yet)</li>
+        <li>Run it to create views (one-time setup)</li>
+        <li>Use "Funlet Analytics Dashboard" to query any view</li>
+        <li>Verify with <code>SELECT * FROM analytics_summary;</code></li>
+    </ol>
+    
+    <h3>Views Created</h3>
+    
+    <h4>Summary Views</h4>
+    <ul>
+        <li><code>analytics_summary</code> - All key metrics in one row</li>
+        <li><code>analytics_flow_activity_summary</code> - Aggregate flow activity</li>
+        <li><code>analytics_invitee_behavior_summary</code> - Invitee metrics totals</li>
+    </ul>
+    
+    <h4>Flow Metrics</h4>
+    <ul>
+        <li><code>analytics_flow_activity</code> - Per-organizer activity</li>
+        <li><code>analytics_flow_completion</code> - Completion rates by workflow</li>
+        <li><code>analytics_flow_dropoffs</code> - Drop-off counts</li>
+        <li><code>analytics_flow_performance</code> - Combined (starts, completions, drop-offs)</li>
+    </ul>
+    
+    <h4>Invitee Metrics</h4>
+    <ul>
+        <li><code>analytics_rsvp_response_rates</code> - Yes/no/unknown percentages</li>
+        <li><code>analytics_rsvp_by_event</code> - Responses per event</li>
+        <li><code>analytics_syncup_votes</code> - Vote distribution</li>
+        <li><code>analytics_time_to_reply</code> - Average/median hours to reply</li>
+        <li><code>analytics_time_to_vote</code> - Average/median hours to vote</li>
+    </ul>
+    
+    <h4>Completion Metrics</h4>
+    <ul>
+        <li><code>analytics_reminder_effectiveness</code> - Reminder response rates</li>
+        <li><code>analytics_non_responders</code> - Invitees who never replied</li>
+    </ul>
+    
+    <h4>System Health</h4>
+    <ul>
+        <li><code>analytics_system_health</code> - SMS, errors, push notifications</li>
+        <li><code>analytics_errors_by_type</code> - Error frequency by type</li>
+        <li><code>analytics_unrecognized_replies_timeline</code> - Unrecognized replies over time</li>
+    </ul>
+    
+    <h3>Indexes Created</h3>
+    <ul>
+        <li><code>event_type</code> (most common filter)</li>
+        <li><code>timestamp</code> (time queries)</li>
+        <li><code>organizer_id</code>, <code>event_id</code>, <code>sync_up_id</code>, <code>invitee_contact_id</code></li>
+        <li>Composite: <code>event_type, timestamp</code></li>
+    </ul>
+    
+    <h3>Querying</h3>
+    
+    <h4>Quick Start</h4>
+    <pre><code>SELECT * FROM analytics_summary;
+SELECT * FROM analytics_flow_performance ORDER BY flows_started DESC;
+SELECT * FROM analytics_invitee_behavior_summary;</code></pre>
+    
+    <h4>Query All Views</h4>
+    <ul>
+        <li>Use the <strong>"Funlet Analytics Dashboard"</strong> SQL file in Supabase SQL Editor</li>
+        <li>Contains queries for all analytics views</li>
+        <li>Run individual queries or sections as needed</li>
+    </ul>
+    
+    <h3>Exporting</h3>
+    <ol>
+        <li>Run query in Supabase SQL Editor</li>
+        <li>Click "Export" → CSV or JSON</li>
+        <li>Use in Excel, Sheets, or data tools</li>
+    </ol>
+    
+    <hr>
+    
+    <h2>How They Work Together</h2>
+    
+    <h3>Example: Creating a Crew</h3>
+    <ol>
+        <li><strong>SMS</strong>: "create crew My Team"</li>
+        <li><strong>Pattern Match</strong>: <code>checkCreateCrewPattern()</code> matches, extracts "My Team"</li>
+        <li><strong>Action</strong>: CREATE_CREW executed, crew created</li>
+        <li><strong>Logging</strong>:
+            <ul>
+                <li><code>logWorkflowStart()</code> → <code>flow_started</code></li>
+                <li><code>logCrewCreated()</code> → <code>crew_created</code></li>
+                <li><code>logWorkflowComplete()</code> → <code>flow_completed</code></li>
+            </ul>
+        </li>
+        <li><strong>Database</strong>: 3 log entries in <code>behavioral_logs</code></li>
+        <li><strong>Analytics</strong>: Views automatically reflect new data</li>
+    </ol>
+    
+    <h3>State Management</h3>
+    <ul>
+        <li>Pattern matching uses <code>conversation_state.waiting_for</code></li>
+        <li>Logger includes <code>workflow_step</code> (often matches <code>waiting_for</code>)</li>
+        <li>Analytics can query by <code>workflow_step</code> for drop-off analysis</li>
+    </ul>
+    
+    <hr>
+    
+    <h2>Creating Reports for Partners</h2>
+    
+    <h3>What Partners See</h3>
+    <ul>
+        <li>Aggregate metrics only (no individual user data)</li>
+        <li>Workflow performance (completion rates, drop-offs)</li>
+        <li>Invitee engagement (response rates, time to reply)</li>
+        <li>System health (errors, SMS delivery)</li>
+    </ul>
+    
+    <h3>Privacy</h3>
+    <ul>
+        <li>No PII (names, emails, message content)</li>
+        <li>No individual data (only aggregates)</li>
+        <li>Phone numbers: counts only, not actual numbers</li>
+    </ul>
+    
+    <hr>
+    
+    <h2>Key Takeaways</h2>
+    <ul>
+        <li><strong>Pattern Matching</strong>: Fast, rule-based, bypasses AI for 90% of commands</li>
+        <li><strong>Logger</strong>: Non-blocking, structured, PII-compliant event tracking</li>
+        <li><strong>Analytics</strong>: SQL views, real-time, no additional infrastructure</li>
+        <li><strong>Integration</strong>: All three work together seamlessly</li>
+        <li><strong>Setup</strong>: One-time SQL file execution, then automatic</li>
+    </ul>
+    
+    <hr>
+    
+    <h2>Quick Reference</h2>
+    <ul>
+        <li><strong>Setup Analytics</strong>: Run <strong>"Setup Behavioral Logs Analytics Views & Indexes"</strong> in Supabase SQL Editor (one-time)</li>
+        <li><strong>Query Views</strong>: <code>SELECT * FROM analytics_summary;</code></li>
+        <li><strong>Query All</strong>: Use <strong>"Funlet Analytics Dashboard"</strong> SQL file in Supabase SQL Editor</li>
+        <li><strong>Export</strong>: Click "Export" in Supabase SQL Editor → CSV/JSON</li>
+    </ul>
+    
+    <div class="info-box" style="margin-top: 2em;">
+        <p><strong>Note</strong>: Both SQL files are already saved in Supabase SQL Editor for easy access</p>
+    </div>
+</body>
+</html>

@@ -1,0 +1,18 @@
+Auto Sync Manual Curl Test Report
+Phone: +11231232323
+User ID: 84174326-705e-4416-a756-416838cf4f26
+Generated: 2026-01-02 11:22:06.954136
+========================================
+
+=== AS-001: Start Auto Sync with no crews ===
+Expected: System responds that no crews exist and exits
+Request: auto sync
+Response: {
+  "success": true,
+  "action": "AUTO_SYNC",
+  "response": "You don't have any crews yet. Text create crew to get started.",
+  "optimization": "pattern_matching"
+}
+Status: PASS
+Notes: Correctly detected no crews
+----------------------------------------

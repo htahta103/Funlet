@@ -1,0 +1,56 @@
+{
+  "total_revenue": 47272.33000000001,
+  "total_expenses": 6180.479999999999,
+  "net_income": 41091.85000000001,
+  "hourly_revenue": 20743.33000000001,
+  "fixed_price_revenue": 25602.0,
+  "bonus_revenue": 927.0,
+  "service_fees": 4815.230000000001,
+  "vat": 127.5,
+  "wht": 861.01,
+  "membership_fees": 359.91,
+  "withdrawal_fees": 16.830000000000002,
+  "total_withdrawn": 41776.200000000004,
+  "total_hours": 888.8333699999998,
+  "avg_hourly_rate": 10.762219694789364,
+  "top_clients": [
+    [
+      "Jonathan W",
+      8780.0
+    ],
+    [
+      "Aadam Patel",
+      8060.0
+    ],
+    [
+      "Rangwan Dusdeesurapot",
+      7589.17
+    ],
+    [
+      "Joseph B",
+      3550.0
+    ],
+    [
+      "RedShiftFrontier",
+      3100.0
+    ]
+  ],
+  "top_freelancers": [
+    [
+      "An Hoang Thien",
+      44462.33000000001
+    ],
+    [
+      "Chan Tran Hoang",
+      1250.0
+    ],
+    [
+      "Duong Bui Nhat",
+      1070.0
+    ],
+    [
+      "Tran Manh Tuong",
+      490.0
+    ]
+  ]
+}

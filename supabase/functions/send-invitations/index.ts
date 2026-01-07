@@ -1,8 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
-// Invitation tracking base URL
-const getInvitationUrl = (invitationCode) => `https://funlet.ai/rsvp/${invitationCode}`;
-
 // Twilio configuration (replace with your actual Twilio credentials)
 const TWILIO_ACCOUNT_SID = Deno.env.get('TWILIO_ACCOUNT_SID');
 const TWILIO_AUTH_TOKEN = Deno.env.get('TWILIO_AUTH_TOKEN');
@@ -377,8 +374,7 @@ Deno.serve(async (req) => {
       // Construct SMS message
       const messageBody = `${invitingUserData.first_name} invited you to ${eventData.title}, ` +
         `${formatDate(eventData.event_date)} at ${eventData.location} ${timeMessage}. ` +
-        `Reply 1=In! 2=Out 3=Maybe. ` +
-        `Full details: ${getInvitationUrl(invitationCode)}`;
+        `Reply 1=In! 2=Out 3=Maybe.`;
 
       try {
         // Send SMS via Twilio with formatted phone number
@@ -491,155 +487,10 @@ Deno.serve(async (req) => {
       }
     }
 
-    // Send confirmation notification to host (SMS or Email based on consent)
-    let hostNotificationStatus = 'not_sent';
-    let hostNotificationMethod = 'none';
-    
-    // Check if host has SMS consent (true = SMS, null/false = email)
-    const hasSmsConsent = invitingUserData.sms_consent === true;
-    
-    if (hasSmsConsent && invitingUserData.phone_number) {
-      // Send SMS notification
-      hostNotificationMethod = 'sms';
-      const hostPhoneNumber = formatPhoneForTwilio(invitingUserData.phone_number);
-      
-      if (hostPhoneNumber) {
-        // Get host's invitation code for the link
-        const { data: hostInvitation, error: hostInvitationError } = await supabase
-          .from('invitations')
-          .select('invitation_code')
-          .eq('event_id', event_id)
-          .is('contact_id', null)
-          .eq('is_host', true)
-          .single();
-
-        // Get total invitations count for this event (including old and new)
-        const { count: totalInvitationCount, error: countError } = await supabase
-          .from('invitations')
-          .select('*', { count: 'exact', head: true })
-          .eq('event_id', event_id)
-          .eq('status', 'sent');
-
-        if (countError) {
-          console.error('Error counting total invitations:', countError);
-        }
-        const successfulInvitations = invitationResults.filter(result => result.status === 'sent').length;
-        const failedInvitations = invitationResults.filter(result => result.status === 'failed').length;
-        const totalCount = totalInvitationCount || 0;
-        
-        // Format time for host message
-        const hostTimeMessage = eventData.end_time 
-          ? `${formatTime(eventData.start_time)}-${formatTime(eventData.end_time)}` 
-          : `${formatTime(eventData.start_time)}`;
-        
-        // Create message with total count and current batch info
-        let hostMessage;
-        const hostInvitationCode = hostInvitation?.invitation_code || event_id; // Fallback to event_id if no invitation code found
-        
-        // Create the new host format: "You invited 8 to Friday Pickleball, 9/12 at Piper Park 12:15am-5:30am. Add to Calendar. Full details: www.funlet.ai/event/wg94tk30/"
-        // Use shortened calendar URL from database instead of long Supabase storage URL
-        const calendarText = eventData.shorten_calendar_url ? `Add to Calendar ${eventData.shorten_calendar_url}. ` : '';
-        
-        if (successfulInvitations > 0) {
-          // Show the total count of all successful invitations
-          hostMessage = `You invited ${totalCount} to ${eventData.title}, ${formatDateShort(eventData.event_date)} at ${eventData.location} ${hostTimeMessage}. ${calendarText}Full details: www.funlet.ai/event/${hostInvitationCode}/`;
-        } else {
-          // No successful invitations in this batch, but show total count
-          hostMessage = `You invited ${totalCount} to ${eventData.title}, ${formatDateShort(eventData.event_date)} at ${eventData.location} ${hostTimeMessage}. ${calendarText}Full details: www.funlet.ai/event/${hostInvitationCode}/`;
-        }
-        
-        console.log('=== HOST SMS DETAILS ===');
-        console.log('Total invitations for event:', totalCount);
-        console.log('Current batch successful:', successfulInvitations);
-        console.log('Current batch failed:', failedInvitations);
-        console.log('Host message:', hostMessage);
-        console.log('=== END HOST SMS ===');
-        
-        try {
-          await twilioClient.messages.create({
-            body: hostMessage,
-            from: TWILIO_PHONE_NUMBER,
-            to: hostPhoneNumber,
-            shortenUrls: true
-          });
-          hostNotificationStatus = 'sent';
-          console.log('Host confirmation SMS sent');
-        } catch (error) {
-          console.error('Failed to send host confirmation SMS:', error);
-          hostNotificationStatus = 'failed';
-        }
-      } else {
-        console.log('Invalid host phone number format');
-        hostNotificationStatus = 'invalid_number';
-      }
-    } else if (!hasSmsConsent && invitingUserData.email) {
-      // Send email notification when SMS consent is null/false
-      hostNotificationMethod = 'email';
-      
-      // Get host's invitation code for the link
-      const { data: hostInvitation, error: hostInvitationError } = await supabase
-        .from('invitations')
-        .select('invitation_code')
-        .eq('event_id', event_id)
-        .is('contact_id', null)
-        .eq('is_host', true)
-        .single();
-
-      // Get total invitations count for this event (including old and new)
-      const { count: totalInvitationCount, error: countError } = await supabase
-        .from('invitations')
-        .select('*', { count: 'exact', head: true })
-        .eq('event_id', event_id)
-        .eq('status', 'sent');
-
-      if (countError) {
-        console.error('Error counting total invitations:', countError);
-      }
-      const successfulInvitations = invitationResults.filter(result => result.status === 'sent').length;
-      const failedInvitations = invitationResults.filter(result => result.status === 'failed').length;
-      const totalCount = totalInvitationCount || 0;
-      
-      // Format time for host message
-      const hostTimeMessage = eventData.end_time 
-        ? `${formatTime(eventData.start_time)}-${formatTime(eventData.end_time)}` 
-        : `${formatTime(eventData.start_time)}`;
-      
-      // Create email content with total count and current batch info
-      let hostEmailContent;
-      const hostInvitationCode = hostInvitation?.invitation_code || event_id; // Fallback to event_id if no invitation code found
-      
-      if (successfulInvitations > 0) {
-        // Show the total count of all successful invitations
-        hostEmailContent = `Hi ${invitingUserData.first_name},\n\nYou invited ${totalCount} people to ${eventData.title}, ${formatDate(eventData.event_date)} at ${eventData.location} ${hostTimeMessage}.\n\nFull details: www.funlet.ai/event/${hostInvitationCode}/\n\nThanks,\nThe Funlet Team`;
-      } else {
-        // No successful invitations in this batch, but show total count
-        hostEmailContent = `Hi ${invitingUserData.first_name},\n\nYou invited ${totalCount} people to ${eventData.title}, ${formatDate(eventData.event_date)} at ${eventData.location} ${hostTimeMessage}.\n\nFull details: www.funlet.ai/event/${hostInvitationCode}/\n\nThanks,\nThe Funlet Team`;
-      }
-      
-      console.log('=== HOST EMAIL DETAILS ===');
-      console.log('Total invitations for event:', totalCount);
-      console.log('Current batch successful:', successfulInvitations);
-      console.log('Current batch failed:', failedInvitations);
-      console.log('Host email content:', hostEmailContent);
-      console.log('=== END HOST EMAIL ===');
-      
-      try {
-        const emailResult = await sendEmailNotification(invitingUserData.email, hostEmailContent);
-        if (emailResult.success) {
-          hostNotificationStatus = 'sent';
-          console.log('Host confirmation email sent');
-        } else {
-          hostNotificationStatus = 'failed';
-          console.error('Failed to send host confirmation email:', emailResult.error);
-        }
-      } catch (error) {
-        console.error('Failed to send host confirmation email:', error);
-        hostNotificationStatus = 'failed';
-      }
-    } else {
-      console.log('No phone number or email found for host, or SMS consent not set');
-      hostNotificationStatus = 'no_contact';
-    }
+    // Skip sending confirmation notification to host - only send to invitees
+    const hostNotificationStatus = 'skipped';
+    const hostNotificationMethod = 'none';
+    console.log('Host notification skipped - only sending to invitees');
 
     return new Response(JSON.stringify({
       message: 'Invitations processed',

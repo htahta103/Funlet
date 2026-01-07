@@ -1,0 +1,125 @@
+{
+  "agency": {
+    "revenue": 47272.33000000001,
+    "hourly": 20743.33000000001,
+    "fixed": 25602.0,
+    "bonus": 927.0,
+    "expenses": 5799.240000000003,
+    "service_fees": 4815.230000000001,
+    "vat": 123.0,
+    "wht": 861.01,
+    "membership": 0,
+    "withdrawal_fees": 0,
+    "withdrawn": 0,
+    "net_income": 41473.090000000004,
+    "hours": 0,
+    "avg_rate": 0,
+    "top_clients": [
+      [
+        "Jonathan W",
+        8780.0
+      ],
+      [
+        "Aadam Patel",
+        8060.0
+      ],
+      [
+        "Rangwan Dusdeesurapot",
+        7589.17
+      ],
+      [
+        "Joseph B",
+        3550.0
+      ],
+      [
+        "RedShiftFrontier",
+        3100.0
+      ],
+      [
+        "Khayem Sadfi",
+        2718.33
+      ],
+      [
+        "Transit Stats",
+        2442.0
+      ],
+      [
+        "Adam M",
+        1800.0
+      ],
+      [
+        "Mario Garcia",
+        1720.8399999999997
+      ],
+      [
+        "Honyaku Cloud",
+        1250.0
+      ]
+    ],
+    "top_freelancers": [
+      [
+        "An Hoang Thien",
+        44462.33000000001
+      ],
+      [
+        "Chan Tran Hoang",
+        1250.0
+      ],
+      [
+        "Duong Bui Nhat",
+        1070.0
+      ],
+      [
+        "Tran Manh Tuong",
+        490.0
+      ]
+    ]
+  },
+  "personal": {
+    "revenue": 9565.82,
+    "hourly": 7365.82,
+    "fixed": 1930.0,
+    "bonus": 270.0,
+    "net_income": 9565.82,
+    "hours": 324.6667000000001,
+    "avg_rate": 29.46350826863364,
+    "top_contracts": [
+      [
+        "Adding push notifications to FlutterFlow app / Xano Backend / using One Signal. (39084479)",
+        4262.51,
+        164.5000100000001
+      ],
+      [
+        "Make fixes to FlutterFlow Xano app and deploy to app stores (38877740)",
+        3103.31,
+        155.16669000000002
+      ],
+      [
+        "Backend Dev for SaaS MVP (Supabase, Stripe, SendGrid) \u2013 GovTech Startup (40975327)",
+        1600.0,
+        0
+      ],
+      [
+        "WeWeb and XANO: Add functionality & polishing (41512676)",
+        300.0,
+        0
+      ],
+      [
+        "1st android test fixes, % in table, order of sports in tab (39388778)",
+        150.0,
+        0
+      ],
+      [
+        "WeWeb developer to fix bugs for MVP (40176611)",
+        150.0,
+        5.0
+      ]
+    ]
+  },
+  "combined": {
+    "total_revenue": 56838.15000000001,
+    "total_expenses": 5799.240000000003,
+    "total_net": 51038.91,
+    "total_hours": 324.6667000000001
+  }
+}

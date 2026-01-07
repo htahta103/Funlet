@@ -1,0 +1,561 @@
+﻿Funlet Auto Sync — Complete Product & Execution Specification (Updated)
+Overview
+Auto Sync is a background coordination process that helps an organizer collect availability responses from a group and decide whether to send calendar invites or stop scheduling. Auto Sync’s role is to collect responses and present state — the organizer always decides what to do next.
+Auto Sync is designed to:
+Run in the background
+
+
+Be resumable
+
+
+Support multiple concurrent Auto Syncs
+
+
+Minimize friction for both organizers and invitees
+
+
+Operate entirely via SMS for invitees
+
+
+Auto Sync is not responsible for making final decisions. It gathers signal and pauses for organizer direction.
+
+Core Principles (Locked)
+Auto Sync gathers responses, then pauses.
+
+
+Auto Sync never auto-decides outcomes.
+
+
+The organizer always chooses whether to:
+
+
+Send invites
+
+
+Send another reminder
+
+
+Stop Auto Sync
+
+
+Auto Sync supports multiple concurrent runs per organizer.
+
+
+Organizer-facing times use the organizer’s time zone.
+
+
+Invitee SMS always includes an explicit time zone.
+
+
+System messages are structured, consistent, and limited in count.
+
+
+No organizer-written messages in Auto Sync v1.
+
+
+Calendar access is optional; Auto Sync fully supports no-calendar mode.
+
+
+
+Terminology
+Organizer / Host: The Funlet user running Auto Sync
+
+
+Invitees: Members of the selected crew
+
+
+Event name: User-provided name for the coordination (required)
+
+
+Auto Sync: A single coordination run
+
+
+Running: Collecting responses
+
+
+Paused: Waiting for organizer action
+
+
+Stopped: Ended without sending invites (archived)
+
+
+Completed: Invites sent (archived)
+
+
+
+Auto Sync Lifecycle & States
+Running
+Auto Sync is actively collecting invitee responses.
+
+
+Invitee replies are accepted.
+
+
+Last reply always wins.
+
+
+Organizer may send invites or stop at any time.
+
+
+Paused
+Auto Sync is waiting for organizer action.
+
+
+Invitee replies are still accepted and reflected.
+
+
+Auto Sync does not advance on its own.
+
+
+Organizer may send a reminder, send invites, or stop.
+
+
+Completed (Archived)
+Invitations have been sent.
+
+
+Auto Sync responsibility ends.
+
+
+Late replies are ignored by Auto Sync.
+
+
+Calendar RSVP behavior takes over.
+
+
+Completed Auto Syncs are archived and never shown in Auto Sync Check.
+
+
+Stopped (Archived)
+Organizer explicitly stops Auto Sync.
+
+
+No invites are sent.
+
+
+No further actions allowed.
+
+
+Stopped Auto Syncs are archived and never shown in Auto Sync Check.
+
+
+
+Phase 1: Auto Sync Setup
+Entry
+Organizer initiates Auto Sync by texting:
+Auto Sync
+
+
+Auto Sync [Crew Name]
+
+
+
+Crew Selection
+Crew recognized
+Crew is selected.
+
+
+Proceed to event name.
+
+
+Crew not recognized
+“I couldn’t find that crew.
+ Try again, text create crew to make a new one, or exit.”
+No crews exist
+“You don’t have any crews yet.
+ Text create crew to get started.”
+
+Event Name (Required)
+Prompt:
+“Event name?”
+If empty:
+“Please add an event name.”
+Rules:
+Event name is required.
+
+
+Event name is shown in invitee messages and calendar invites.
+
+
+Event name is never replaced by the crew name.
+
+
+Duplicate event names are allowed.
+
+
+
+Calendar Access (Optional)
+If Google Calendar is connected, it is used automatically.
+
+
+Auto Sync never prompts the organizer to connect a calendar.
+
+
+If calendar is not connected, Auto Sync proceeds in no-calendar mode.
+
+
+Calendar status is evaluated at Auto Sync start and applies only to that run.
+
+
+
+Phase 2: Auto Sync Configuration
+Step 1: Time Definition
+With calendar connected
+Organizer provides time windows in natural language.
+
+
+Funlet evaluates calendar availability.
+
+
+No-calendar mode
+Organizer provides 1–3 concrete date/time options.
+
+
+No recommendations are generated.
+
+
+No conflict checking occurs.
+
+
+If input is insufficient:
+Ask a single clarifying question.
+
+
+Organizer may exit at any time.
+ Exiting discards Auto Sync entirely.
+
+Step 2: Option Proposal (Calendar Mode Only)
+One option shown at a time.
+
+
+Week-level calendar visual (Monday–Sunday).
+
+
+Calendar is read-only.
+
+
+Proposed time is highlighted.
+
+
+Primary message:
+“Here’s a window that works.
+ [Day], [Date] at [Time].
+ Reply yes to save, suggest a change, or next to see another option.”
+Rules:
+Valid adjustments are accepted.
+
+
+Conflicts are rejected.
+
+
+Suggestions outside the shown week load the new week.
+
+
+If no open windows:
+“I couldn’t find a fully open window, but here’s the closest option.”
+If calendar access fails:
+“I’m having trouble accessing your calendar right now. Try again soon.”
+ Auto Sync is discarded.
+
+Step 3: Saving Options
+Organizer may save 1–3 options.
+
+
+Options are saved one at a time.
+
+
+After saving:
+“Saved.
+ [Day], [Date] at [Time].
+ Send Auto Sync, add another option, or exit?”
+After 3rd option:
+“Saved.
+ You’ve added the maximum number of options.
+ Reply send to start Auto Sync, or exit.”
+
+Step 4: Response Goal
+Prompt:
+“What’s the response goal?
+ Reply 1 for Everyone, 2 for Critical mass.”
+Notes:
+In v1, Everyone and Critical Mass behave identically.
+
+
+The distinction is stored for future versions.
+
+
+
+Step 5: Send Auto Sync Confirmation
+Prompt:
+“Ready to start Auto Sync?
+ Reply send or exit.”
+Accepted:
+send
+
+
+yes
+
+
+y
+
+
+If calendar is not connected and no time zone exists:
+Prompt for time zone after send, before messages go out.
+
+
+If user exits during time zone prompt:
+Sending is canceled.
+
+
+Auto Sync is discarded.
+
+
+
+Phase 3: Auto Sync Execution
+General Rules
+Multiple Auto Syncs may run concurrently.
+
+
+Each Auto Sync is independent.
+
+
+Invitee replies bind to the most recent unresolved Auto Sync message.
+
+
+Last reply always wins (Running or Paused).
+
+
+No automatic decisions are made.
+
+
+
+Invitee Availability Message (Required Header Locked)
+Invitee SMS header is always:
+“[Organizer name] is finding a time for [Event name].”
+Example:
+“Jon is finding a time for Dinner Catch-Up.”
+
+Invitee Availability Message (Body)
+“Which of these work for you?
+Thu, Dec 12 at 7:00–9:00 PM PT
+
+
+Fri, Dec 13 at 6:30 PM PT
+
+
+Sun, Dec 15 at 5:00 PM PT
+ Reply with the number(s) that work, or none if nothing works.”
+
+
+Rules:
+Extract all valid numbers.
+
+
+Ignore all other text.
+
+
+No follow-up questions.
+
+
+No “Maybe” responses exist.
+
+
+If no valid numbers:
+“Reply with the number(s) that work for you, or none if nothing works.”
+
+Timing & State Transitions
+Initial Run
+Start → Running
+
+
+24 hours → Automatic reminder sent
+
+
+48 hours → Paused
+
+
+User-Initiated Reminder
+Paused → Running
+
+
+24 hours later → Paused
+
+
+No automatic reminder
+
+
+Unlimited cycles allowed
+
+
+
+Organizer Updates (Locked)
+Immediately after start:
+
+
+ “Auto Sync sent to [TOTAL] people.”
+
+
+
+After 24-hour reminder:
+
+
+ “Reminder sent for [EVENT NAME] to [PENDING] of [TOTAL] people.
+ Reply auto sync check to manage.”
+
+
+
+At pause:
+
+
+ Status summary + options
+
+
+
+No other organizer notifications are sent.
+
+Paused State Summary
+“Auto Sync paused for [EVENT NAME].
+ Responses so far ([RESPONDED]/[TOTAL]):
+ Available: [X]
+ Not available: [X]
+ No response: [X]
+ Reply 1 to send another reminder, 2 to send invites, or exit.”
+
+Sending Invites (Any Time)
+Allowed while Running or Paused.
+
+
+Immediately completes Auto Sync.
+
+
+Auto Sync becomes Completed (archived).
+
+
+After invites:
+“You’re invited to [EVENT NAME] on
+ [Date] at [Time].
+ Calendar invite sent.”
+Late replies receive:
+“Got it — thanks.”
+
+Stop Auto Sync
+Prompt:
+“Stop Auto Sync for [EVENT NAME]?
+ Reply yes to confirm, or exit.”
+Confirmation:
+“Auto Sync stopped for [EVENT NAME].”
+No invitee messages are sent.
+
+
+Stop behaves identically from Running or Paused.
+
+
+
+Auto-Ending Rule (Locked)
+If all proposed time options have fully passed (based on end time):
+Auto Sync automatically stops.
+
+
+It is archived silently.
+
+
+No organizer message is sent.
+
+
+No further actions are allowed.
+
+
+
+Auto Sync Check
+Command:
+ auto sync check
+Shows only active Auto Syncs (Running or Paused):
+“Here are your Auto Syncs:
+[EVENT NAME] — Running — [RESPONDED]/[TOTAL]
+
+
+[EVENT NAME] — Paused — [RESPONDED]/[TOTAL]
+ Reply with a number to manage, or exit.”
+
+
+If none exist:
+“You don’t have any active Auto Syncs.
+ Text Auto Sync to create one.”
+
+Invitee Reply Handling (Edge Cases)
+Replies after Stop or Completion:
+
+
+ “Got it — thanks.”
+
+
+
+Replies always bind to the most recent unresolved Auto Sync.
+
+
+No clarification questions are sent.
+
+
+No invitee ever sees the term “Auto Sync.”
+
+
+
+Time Zones (Locked)
+Calendar connected → use calendar time zone.
+
+
+No calendar → time zone required at send-time.
+
+
+Numbered selection only.
+
+
+Stored and reused.
+
+
+Invitee SMS always includes time zone.
+
+
+Organizer times never include labels.
+
+
+
+Explicit Non-Features (v1)
+No organizer-written messages
+
+
+No automatic decisions
+
+
+No auto-ending except when dates pass
+
+
+No invitee calendar access during Auto Sync
+
+
+No deduplication across Auto Syncs
+
+
+No proactive organizer notifications beyond defined messages
+
+
+
+Summary
+Auto Sync is a coordination engine, not a decision engine.
+Its job is to:
+Collect responses
+
+
+Present state clearly
+
+
+Pause
+
+
+Let the organizer decide
+
+
+
+End of document.
+
+

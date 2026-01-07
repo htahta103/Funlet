@@ -1,4 +1,9 @@
-<!-- 21d06e15-8f4a-423d-a970-a76a742ff57a 12ff14ff-a4be-43f4-b156-b3e3c2d85a76 -->
+---
+name: Implement SYNC_UP with Pattern Matching
+overview: ""
+todos: []
+---
+
 # Implement SYNC_UP with Pattern Matching
 
 ## Overview
@@ -9,9 +14,7 @@ Implement SYNC_UP action following the same pattern matching approach as SEND_IN
 
 ### 1. Add SYNC_UP Pattern Matching Function
 
-**File**: `supabase/functions/funlet-sms-handler-v2/index.ts`
-
-Add new pattern matching function after `checkInviteMorePeoplePattern`:
+**File**: `supabase/functions/funlet-sms-handler-v2/index.ts`Add new pattern matching function after `checkInviteMorePeoplePattern`:
 
 ```typescript
 // Check for SYNC_UP patterns
@@ -39,11 +42,11 @@ function checkSyncUpPattern(message: string): { isMatch: boolean } {
 }
 ```
 
+
+
 ### 2. Add SYNC_UP to Pattern Matching Check
 
-**File**: `supabase/functions/funlet-sms-handler-v2/index.ts`
-
-In `checkPatternMatches` function (around line 520), add SYNC_UP check:
+**File**: `supabase/functions/funlet-sms-handler-v2/index.ts`In `checkPatternMatches` function (around line 520), add SYNC_UP check:
 
 ```typescript
 // Check SYNC_UP patterns
@@ -55,6 +58,8 @@ if (syncUpResult.isMatch) {
   };
 }
 ```
+
+
 
 ### 3. Add Sync Up Details Input Pattern
 
@@ -99,6 +104,8 @@ if (currentState?.waiting_for === 'sync_up_details_input') {
 }
 ```
 
+
+
 ### 4. Add Time Options Input Pattern
 
 Add pattern for detecting time options input:
@@ -114,6 +121,8 @@ if (currentState?.waiting_for === 'sync_up_time_options') {
   };
 }
 ```
+
+
 
 ### 5. Add Sync Up Confirmation Pattern
 
@@ -137,11 +146,11 @@ if (currentState?.waiting_for === 'sync_up_confirmation') {
 }
 ```
 
+
+
 ### 6. Implement SYNC_UP Handler (Initial Trigger)
 
-**File**: `supabase/functions/funlet-sms-handler-v2/index.ts`
-
-Add in pattern matching section (around line 3426):
+**File**: `supabase/functions/funlet-sms-handler-v2/index.ts`Add in pattern matching section (around line 3426):
 
 ```typescript
 } else if (action === 'SYNC_UP') {
@@ -232,6 +241,8 @@ Add in pattern matching section (around line 3426):
 }
 ```
 
+
+
 ### 7. Add Crew Selection for Sync Up
 
 Add pattern for crew selection:
@@ -312,6 +323,8 @@ Implement handler:
 }
 ```
 
+
+
 ### 8. Implement Sync Up Details Input Handler
 
 This handler receives the full sync up details and uses AI (Tier 3) to parse event name, location, and time options:
@@ -382,6 +395,8 @@ This handler receives the full sync up details and uses AI (Tier 3) to parse eve
 }
 ```
 
+
+
 ### 9. Keep AI Processing for Complex Parsing
 
 For SYNC_UP_DETAILS_INPUT and time options parsing, we'll use the existing AI processing (Tier 3) since this requires:
@@ -407,13 +422,11 @@ const allowPatternMatching = !isInOnboarding ||
     patternResult.action === 'SYNC_UP'));
 ```
 
+
+
 ## Summary
 
 The implementation creates a hybrid approach:
 
 - **Pattern matching (Tier 1)**: Triggers, crew selection, confirmations
 - **AI processing (Tier 3)**: Complex parsing of event details and time options
-- **Similar to SEND_INVITATIONS**: Asks for complete details in predefined format
-- **Additional step**: Time options collection and parsing
-
-This maintains consistency with the existing optimized workflows while handling the complexity of time option parsing through AI.

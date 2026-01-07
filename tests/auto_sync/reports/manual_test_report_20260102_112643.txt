@@ -1,0 +1,183 @@
+Auto Sync Manual Curl Test Report
+Phone: +11231232323
+User ID: 84174326-705e-4416-a756-416838cf4f26
+Generated: 2026-01-02 11:26:43.539571
+============================================================
+
+=== AS-001: Start Auto Sync with no crews ===
+Expected: System responds that no crews exist and exits
+Request: auto sync
+Response:
+{
+  "success": true,
+  "action": "AUTO_SYNC",
+  "response": "You don't have any crews yet. Text create crew to get started.",
+  "optimization": "pattern_matching"
+}
+Status: PASS
+Notes: Correctly detected no crews
+------------------------------------------------------------
+
+=== AS-002: Start Auto Sync with crew selection ===
+Expected: Crew selected, system prompts for event name
+Request: auto sync Friends
+Response:
+{
+  "success": true,
+  "action": "AUTO_SYNC",
+  "response": "You don't have any crews yet. Text create crew to get started.",
+  "optimization": "pattern_matching"
+}
+Status: FAIL
+Notes: Unexpected: You don't have any crews yet. Text create crew to get started.
+------------------------------------------------------------
+
+=== AS-003: Invalid crew name ===
+Expected: System responds crew not found
+Request: auto sync FakeCrew
+Response:
+{
+  "success": true,
+  "action": "AUTO_SYNC",
+  "response": "You don't have any crews yet. Text create crew to get started.",
+  "optimization": "pattern_matching"
+}
+Status: FAIL
+Notes: Did not reject: You don't have any crews yet. Text create crew to get started.
+------------------------------------------------------------
+
+=== AS-004: Event name required ===
+Expected: System re-prompts for event name
+Request: blank message after crew selection
+Response:
+{
+  "success": true,
+  "action": "INVALID",
+  "response": "I didn't understand that. Try again or type 'menu' to see what you can do.",
+  "confidence": 0.95,
+  "extracted_params": {
+    "invalid_subtype": "INVALID_GIBBERISH"
+  },
+  "model_used": "gpt-4o-mini",
+  "assistant_id": "asst_9kEyZG4LBZqcGD0myFEI6BgN",
+  "thread_id": "thread_UPTiRxj5gpbZ2XoPEcspdpq1",
+  "assistant_response": "{\"action\":\"INVALID\",\"subtype\":\"INVALID_GIBBERISH\"}",
+  "is_structured_response": true
+}
+Status: FAIL
+Notes: Did not re-prompt: I didn't understand that. Try again or type 'menu' to see what you can do.
+------------------------------------------------------------
+
+=== AS-005: Exit during setup ===
+Expected: Auto Sync is discarded; normal chat resumes
+Request: exit
+Response:
+{
+  "success": true,
+  "action": "EXIT",
+  "response": "What would you like to do next?",
+  "optimization": "pattern_matching"
+}
+Status: FAIL
+Notes: Did not cancel: What would you like to do next?
+------------------------------------------------------------
+
+=== AS-006: Calendar connected auto-detection ===
+Expected: Calendar is used automatically; no calendar prompt shown
+Request: auto sync Friends -> Test Event
+Response:
+{
+  "success": true,
+  "action": "INVALID_UNCLEAR_COMMAND",
+  "response": "I didn't understand that. Try again or type 'menu' to see what you can do.",
+  "confidence": 0.95,
+  "extracted_params": {},
+  "model_used": "gpt-4o-mini",
+  "assistant_id": "asst_9kEyZG4LBZqcGD0myFEI6BgN",
+  "thread_id": "thread_jqTYs4xygurfQyi1D0tRpFnQ",
+  "assistant_response": "{\"action\":\"INVALID_UNCLEAR_COMMAND\"}",
+  "is_structured_response": true
+}
+Status: SKIP
+Notes: User has no calendar tokens: I didn't understand that. Try again or type 'menu' to see what you can do.
+------------------------------------------------------------
+
+=== AS-007: Calendar not connected ===
+Expected: Auto Sync proceeds in no-calendar mode
+Request: auto sync Friends -> Test Event
+Response:
+{
+  "success": true,
+  "action": "INVALID_UNCLEAR_COMMAND",
+  "response": "I didn't understand that. Try again or type 'menu' to see what you can do.",
+  "confidence": 0.95,
+  "extracted_params": {},
+  "model_used": "gpt-4o-mini",
+  "assistant_id": "asst_9kEyZG4LBZqcGD0myFEI6BgN",
+  "thread_id": "thread_nbDJhHFwuwGK39pNuziVGLlN",
+  "assistant_response": "{\"action\":\"INVALID_UNCLEAR_COMMAND\"}",
+  "is_structured_response": true
+}
+Status: FAIL
+Notes: Wrong mode: I didn't understand that. Try again or type 'menu' to see what you can do.
+------------------------------------------------------------
+
+=== AS-008: No calendar prompt shown ===
+Expected: System does not prompt to connect calendar
+Request: auto sync Friends -> Test Event
+Response:
+{
+  "success": true,
+  "action": "INVALID_UNCLEAR_COMMAND",
+  "response": "I didn't understand that. Try again or type 'menu' to see what you can do.",
+  "confidence": 0.95,
+  "extracted_params": {},
+  "model_used": "gpt-4o-mini",
+  "assistant_id": "asst_9kEyZG4LBZqcGD0myFEI6BgN",
+  "thread_id": "thread_F6P4sSsxlBU5QYUOwvFE10Lc",
+  "assistant_response": "{\"action\":\"INVALID_UNCLEAR_COMMAND\"}",
+  "is_structured_response": true
+}
+Status: PASS
+Notes: No calendar prompt shown
+------------------------------------------------------------
+
+=== AS-009: Calendar mode time window input ===
+Expected: System evaluates calendar
+Request: next week evenings
+Response:
+{
+  "success": true,
+  "action": "INVALID_UNCLEAR_COMMAND",
+  "response": "I didn't understand that. Try again or type 'menu' to see what you can do.",
+  "confidence": 0.95,
+  "extracted_params": {},
+  "model_used": "gpt-4o-mini",
+  "assistant_id": "asst_9kEyZG4LBZqcGD0myFEI6BgN",
+  "thread_id": "thread_h42vMDWNEVYFYmWRaY4AbgNk",
+  "assistant_response": "{\"action\":\"INVALID_UNCLEAR_COMMAND\"}",
+  "is_structured_response": true
+}
+Status: SKIP
+Notes: Requires calendar tokens: I didn't understand that. Try again or type 'menu' to see what you can do.
+------------------------------------------------------------
+
+=== AS-010: Calendar search produces option ===
+Expected: System proposes first option with calendar view
+Request: next week evenings
+Response:
+{
+  "success": true,
+  "action": "INVALID_UNCLEAR_COMMAND",
+  "response": "I didn't understand that. Try again or type 'menu' to see what you can do.",
+  "confidence": 0.95,
+  "extracted_params": {},
+  "model_used": "gpt-4o-mini",
+  "assistant_id": "asst_9kEyZG4LBZqcGD0myFEI6BgN",
+  "thread_id": "thread_4WF6K66qWEVLNxQfTOINbcNf",
+  "assistant_response": "{\"action\":\"INVALID_UNCLEAR_COMMAND\"}",
+  "is_structured_response": true
+}
+Status: SKIP
+Notes: Requires calendar tokens: I didn't understand that. Try again or type 'menu' to see what you can do.
+------------------------------------------------------------

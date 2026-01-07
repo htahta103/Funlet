@@ -1,0 +1,22 @@
+[
+  {
+    "step": "No Calendar - Setup",
+    "phone": "+11231232323",
+    "request": "clear_state",
+    "response": {
+      "raw": "cleared"
+    },
+    "status": "INFO",
+    "notes": "Cleared conversation state"
+  },
+  {
+    "step": "Calendar - Setup",
+    "phone": "+187778042361",
+    "request": "clear_state",
+    "response": {
+      "raw": "cleared"
+    },
+    "status": "INFO",
+    "notes": "Cleared conversation state"
+  }
+]

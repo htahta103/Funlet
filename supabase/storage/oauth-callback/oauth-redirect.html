@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OAuth Redirect Handler</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .container {
+            background: white;
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            text-align: center;
+            max-width: 500px;
+        }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 1rem;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        h2 { color: #333; margin-bottom: 1rem; }
+        p { color: #666; }
+        .error { color: #e74c3c; }
+        .success { color: #27ae60; }
+        .token-info {
+            background: #f8f9fa;
+            padding: 1rem;
+            border-radius: 8px;
+            margin-top: 1rem;
+            text-align: left;
+            font-size: 0.9rem;
+        }
+        .token-info code {
+            background: #e9ecef;
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.85rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="spinner"></div>
+        <h2>Processing OAuth...</h2>
+        <p id="status">Extracting tokens from URL...</p>
+        <div id="token-info" class="token-info" style="display: none;"></div>
+    </div>
+
+    <script>
+        // Extract tokens from URL hash
+        const hash = window.location.hash.substring(1);
+        const params = new URLSearchParams(hash);
+        
+        const accessToken = params.get('access_token');
+        const providerToken = params.get('provider_token');
+        const providerRefreshToken = params.get('provider_refresh_token');
+        const refreshToken = params.get('refresh_token');
+        const expiresIn = params.get('expires_in');
+        const expiresAt = params.get('expires_at');
+
+        const statusEl = document.getElementById('status');
+        const tokenInfoEl = document.getElementById('token-info');
+
+        if (accessToken && providerToken) {
+            statusEl.className = 'success';
+            statusEl.textContent = '✓ Tokens extracted successfully!';
+            
+            // Show token info
+            tokenInfoEl.style.display = 'block';
+            tokenInfoEl.innerHTML = `
+                <strong>Tokens Received:</strong><br>
+                • Supabase Token: <code>${accessToken.substring(0, 20)}...</code><br>
+                • Google Token: <code>${providerToken.substring(0, 20)}...</code><br>
+                • Google Refresh: <code>${providerRefreshToken ? providerRefreshToken.substring(0, 20) + '...' : '❌ NOT PROVIDED'}</code><br>
+                ${providerRefreshToken ? '<br>✅ <strong>Success! You have the provider_refresh_token!</strong>' : '<br>❌ <strong>Missing provider_refresh_token</strong> - Check OAuth configuration'}
+            `;
+            
+            // Log full tokens to console for debugging
+            console.log('Full tokens received:', {
+                access_token: accessToken,
+                provider_token: providerToken,
+                provider_refresh_token: providerRefreshToken,
+                refresh_token: refreshToken,
+                expires_in: expiresIn,
+                expires_at: expiresAt
+            });
+
+            // Check if we have provider_refresh_token
+            if (!providerRefreshToken) {
+                console.warn('⚠️ provider_refresh_token is missing! Make sure your OAuth URL includes access_type=offline and prompt=consent');
+            }
+
+            // Send tokens to parent window (if opened in popup)
+            if (window.opener) {
+                window.opener.postMessage({
+                    type: 'oauth_success',
+                    tokens: {
+                        access_token: accessToken,
+                        provider_token: providerToken,
+                        provider_refresh_token: providerRefreshToken,
+                        refresh_token: refreshToken,
+                        expires_in: expiresIn,
+                        expires_at: expiresAt
+                    }
+                }, '*');
+                
+                setTimeout(() => {
+                    statusEl.textContent = '✓ Tokens sent to parent window. Closing...';
+                    window.close();
+                }, 2000);
+            } else {
+                // If not in popup, redirect to your WeWeb app
+                // CHANGE THIS URL to your WeWeb app's callback page
+                const appUrl = 'https://your-weweb-app.com/oauth-callback';
+                
+                // Wait 3 seconds so user can see the success message
+                setTimeout(() => {
+                    statusEl.textContent = 'Redirecting to app...';
+                    window.location.href = appUrl + window.location.hash;
+                }, 3000);
+            }
+        } else {
+            statusEl.className = 'error';
+            statusEl.textContent = '✗ Error: Missing tokens in URL';
+            tokenInfoEl.style.display = 'block';
+            tokenInfoEl.innerHTML = '<strong>Error:</strong> No tokens found in URL hash. The OAuth flow may have failed.';
+            console.error('OAuth error: No tokens in URL hash', { hash, fullUrl: window.location.href });
+        }
+    </script>
+</body>
+</html>

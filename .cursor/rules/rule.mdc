@@ -1,0 +1,15 @@
+---
+alwaysApply: true
+---
+
+## Sample curl commands for testing
+
+### Beta function (funlet-sms-handler-beta) - Auto Sync testing:
+cd /Users/andy/Funlet && sleep 1 && curl -s -X POST "https://jjkduivjlzazcvdeeqde.supabase.co/functions/v1/funlet-sms-handler-beta" -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Impqa2R1aXZqbHphemN2ZGVlcWRlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTIyNTUxOTgsImV4cCI6MjA2NzgzMTE5OH0.wo23Zti6Nz4knoN8aluS-wNb6AAVXMtaz-DSEKZaTrs" -H "Content-Type: application/json" -d '{"message": "auto sync", "phone_number": "+187778042361", "is_host": true, "send_sms": false}' | python3 -m json.tool
+
+### V2 function (funlet-sms-handler-v2) - Original testing:
+cd /Users/andy/Funlet && sleep 1 && curl -s -X POST "https://jjkduivjlzazcvdeeqde.supabase.co/functions/v1/funlet-sms-handler-v2" -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Impqa2R1aXZqbHphemN2ZGVlcWRlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTIyNTUxOTgsImV4cCI6MjA2NzgzMTE5OH0.wo23Zti6Nz4knoN8aluS-wNb6AAVXMtaz-DSEKZaTrs" -H "Content-Type: application/json" -d '{"message": "send message", "phone_number": "+187778042361", "is_host": true, "send_sms": false}' && sleep 1 && curl -s -X POST "https://jjkduivjlzazcvdeeqde.supabase.co/functions/v1/funlet-sms-handler-v2" -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Impqa2R1aXZqbHphemN2ZGVlcWRlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTIyNTUxOTgsImV4cCI6MjA2NzgzMTE5OH0.wo23Zti6Nz4knoN8aluS-wNb6AAVXMtaz-DSEKZaTrs" -H "Content-Type: application/json" -d '{"message": "1", "phone_number": "+187778042361", "is_host": true, "send_sms": false}' | python3 -m json.tool
+
+
+alway deploy with option --no-verify-jwt
+

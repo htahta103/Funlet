@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2025 Year-End Report - Agency & Personal Work</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 40px 20px;
+            color: #333;
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 60px 40px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 3em;
+            margin-bottom: 10px;
+            font-weight: 700;
+        }
+        
+        .header p {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+        
+        .content {
+            padding: 40px;
+        }
+        
+        .section {
+            margin-bottom: 50px;
+        }
+        
+        .section-title {
+            font-size: 2em;
+            color: #667eea;
+            margin-bottom: 30px;
+            padding-bottom: 10px;
+            border-bottom: 3px solid #667eea;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 30px;
+            margin-bottom: 40px;
+        }
+        
+        .stat-card {
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            padding: 30px;
+            border-radius: 15px;
+            text-align: center;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .stat-card.primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .stat-card.success {
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            color: white;
+        }
+        
+        .stat-card.warning {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+        }
+        
+        .stat-label {
+            font-size: 0.9em;
+            opacity: 0.9;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .stat-value {
+            font-size: 2.5em;
+            font-weight: 700;
+        }
+        
+        .breakdown-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+        }
+        
+        .breakdown-card {
+            background: #f8f9fa;
+            padding: 25px;
+            border-radius: 15px;
+            border-left: 5px solid #667eea;
+        }
+        
+        .breakdown-card h3 {
+            color: #667eea;
+            margin-bottom: 20px;
+            font-size: 1.3em;
+        }
+        
+        .breakdown-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 15px 0;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .breakdown-item:last-child {
+            border-bottom: none;
+            font-weight: 700;
+            font-size: 1.1em;
+            padding-top: 20px;
+        }
+        
+        .breakdown-label {
+            color: #666;
+        }
+        
+        .breakdown-value {
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .list-card {
+            background: #f8f9fa;
+            padding: 25px;
+            border-radius: 15px;
+            margin-bottom: 20px;
+        }
+        
+        .list-card h3 {
+            color: #667eea;
+            margin-bottom: 20px;
+            font-size: 1.3em;
+        }
+        
+        .list-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .list-item:last-child {
+            border-bottom: none;
+        }
+        
+        .list-name {
+            font-weight: 500;
+            color: #333;
+        }
+        
+        .list-value {
+            font-weight: 700;
+            color: #667eea;
+        }
+        
+        .footer {
+            background: #f8f9fa;
+            padding: 30px 40px;
+            text-align: center;
+            color: #666;
+            border-top: 1px solid #e0e0e0;
+        }
+        
+        @media (max-width: 768px) {
+            .header h1 {
+                font-size: 2em;
+            }
+            
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .content {
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>2025 Year-End Report</h1>
+            <p>Agency & Personal Work Financial Analysis</p>
+        </div>
+        
+        <div class="content">
+            <!-- Financial Overview -->
+            <div class="section">
+                <h2 class="section-title">Financial Overview</h2>
+                <div class="stats-grid">
+                    <div class="stat-card primary">
+                        <div class="stat-label">Total Revenue</div>
+                        <div class="stat-value">$47,272</div>
+                    </div>
+                    <div class="stat-card warning">
+                        <div class="stat-label">Total Expenses</div>
+                        <div class="stat-value">$6,180</div>
+                    </div>
+                    <div class="stat-card success">
+                        <div class="stat-label">Net Income</div>
+                        <div class="stat-value">$41,092</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Total Withdrawn</div>
+                        <div class="stat-value">$41,776</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Revenue Breakdown -->
+            <div class="section">
+                <h2 class="section-title">Revenue Breakdown</h2>
+                <div class="breakdown-grid">
+                    <div class="breakdown-card">
+                        <h3>Revenue by Type</h3>
+                        <div class="breakdown-item">
+                            <span class="breakdown-label">Hourly Work</span>
+                            <span class="breakdown-value">$20,743</span>
+                        </div>
+                        <div class="breakdown-item">
+                            <span class="breakdown-label">Fixed Price Projects</span>
+                            <span class="breakdown-value">$25,602</span>
+                        </div>
+                        <div class="breakdown-item">
+                            <span class="breakdown-label">Bonuses</span>
+                            <span class="breakdown-value">$927</span>
+                        </div>
+                        <div class="breakdown-item">
+                            <span class="breakdown-label">Total Revenue</span>
+                            <span class="breakdown-value">$47,272</span>
+                        </div>
+                    </div>
+                    
+                    <div class="breakdown-card">
+                        <h3>Expense Breakdown</h3>
+                        <div class="breakdown-item">
+                            <span class="breakdown-label">Service Fees</span>
+                            <span class="breakdown-value">$4,815</span>
+                        </div>
+                        <div class="breakdown-item">
+                            <span class="breakdown-label">VAT</span>
+                            <span class="breakdown-value">$128</span>
+                        </div>
+                        <div class="breakdown-item">
+                            <span class="breakdown-label">Withholding Tax (WHT)</span>
+                            <span class="breakdown-value">$861</span>
+                        </div>
+                        <div class="breakdown-item">
+                            <span class="breakdown-label">Membership Fees</span>
+                            <span class="breakdown-value">$360</span>
+                        </div>
+                        <div class="breakdown-item">
+                            <span class="breakdown-label">Withdrawal Fees</span>
+                            <span class="breakdown-value">$17</span>
+                        </div>
+                        <div class="breakdown-item">
+                            <span class="breakdown-label">Total Expenses</span>
+                            <span class="breakdown-value">$6,180</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Work Statistics -->
+            <div class="section">
+                <h2 class="section-title">Work Statistics</h2>
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-label">Total Hours Worked</div>
+                        <div class="stat-value">889</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Average Hourly Rate</div>
+                        <div class="stat-value">$10.76</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Top Clients -->
+            <div class="section">
+                <h2 class="section-title">Top Clients by Revenue</h2>
+                <div class="list-card">
+                    <div class="list-item">
+                        <span class="list-name">1. Jonathan W</span>
+                        <span class="list-value">$8,780</span>
+                    </div>
+                    <div class="list-item">
+                        <span class="list-name">2. Aadam Patel</span>
+                        <span class="list-value">$8,060</span>
+                    </div>
+                    <div class="list-item">
+                        <span class="list-name">3. Rangwan Dusdeesurapot</span>
+                        <span class="list-value">$7,589</span>
+                    </div>
+                    <div class="list-item">
+                        <span class="list-name">4. Joseph B</span>
+                        <span class="list-value">$3,550</span>
+                    </div>
+                    <div class="list-item">
+                        <span class="list-name">5. RedShiftFrontier</span>
+                        <span class="list-value">$3,100</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Top Freelancers -->
+            <div class="section">
+                <h2 class="section-title">Top Freelancers by Revenue</h2>
+                <div class="list-card">
+                    <div class="list-item">
+                        <span class="list-name">1. An Hoang Thien</span>
+                        <span class="list-value">$44,462</span>
+                    </div>
+                    <div class="list-item">
+                        <span class="list-name">2. Chan Tran Hoang</span>
+                        <span class="list-value">$1,250</span>
+                    </div>
+                    <div class="list-item">
+                        <span class="list-name">3. Duong Bui Nhat</span>
+                        <span class="list-value">$1,070</span>
+                    </div>
+                    <div class="list-item">
+                        <span class="list-name">4. Tran Manh Tuong</span>
+                        <span class="list-value">$490</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Technology Stack -->
+            <div class="section">
+                <h2 class="section-title">Technology Stack</h2>
+                <div class="list-card">
+                    <p style="color: #666; line-height: 2;">
+                        Based on project descriptions, the primary technologies used throughout 2025 include:
+                        <strong>WeWeb</strong>, <strong>Xano</strong>, <strong>Supabase</strong>, 
+                        <strong>FlutterFlow</strong>, <strong>Stripe</strong>, and <strong>Twilio</strong>.
+                    </p>
+                </div>
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p>Generated on December 31, 2025</p>
+            <p style="margin-top: 10px; font-size: 0.9em;">All financial figures are in USD</p>
+        </div>
+    </div>
+</body>
+</html>
+
