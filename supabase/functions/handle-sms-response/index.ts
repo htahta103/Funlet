@@ -416,11 +416,11 @@ Deno.serve(async (req) => {
       }
 
       if (hostProfile) {
-        console.log('User is a host, forwarding to funlet-sms-handler');
+        console.log('User is a host, forwarding to funlet-sms-handler-beta');
 
-        // Forward to funlet-sms-handler-v2 for AI processing
+        // Forward to funlet-sms-handler-beta for AI processing
         try {
-          const handlerResponse = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/funlet-sms-handler-v2`, {
+          const handlerResponse = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/funlet-sms-handler-beta`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -435,7 +435,7 @@ Deno.serve(async (req) => {
 
           if (handlerResponse.ok) {
             const handlerData = await handlerResponse.json();
-            console.log('funlet-sms-handler response:', handlerData);
+            console.log('funlet-sms-handler-beta response:', handlerData);
             
             return new Response(JSON.stringify({
               success: true,
@@ -448,10 +448,10 @@ Deno.serve(async (req) => {
               }
             });
           } else {
-            console.error('funlet-sms-handler failed:', handlerResponse.status, await handlerResponse.text());
+            console.error('funlet-sms-handler-beta failed:', handlerResponse.status, await handlerResponse.text());
           }
         } catch (error) {
-          console.error('Failed to forward to funlet-sms-handler:', error);
+          console.error('Failed to forward to funlet-sms-handler-beta:', error);
         }
         
         // If forwarding fails, return a helpful message
@@ -467,11 +467,11 @@ Deno.serve(async (req) => {
         });
       }
       
-      // If not a host, forward to funlet-sms-handler-v2 for pattern matching
-      console.log('User is not a host, forwarding to funlet-sms-handler-v2 for pattern matching');
+      // If not a host, forward to funlet-sms-handler-beta for pattern matching
+      console.log('User is not a host, forwarding to funlet-sms-handler-beta for pattern matching');
       
       try {
-        const handlerResponse = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/funlet-sms-handler-v2`, {
+        const handlerResponse = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/funlet-sms-handler-beta`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -486,7 +486,7 @@ Deno.serve(async (req) => {
 
         if (handlerResponse.ok) {
           const handlerData = await handlerResponse.json();
-          console.log('funlet-sms-handler-v2 response:', handlerData);
+          console.log('funlet-sms-handler-beta response:', handlerData);
           
           return new Response(JSON.stringify({
             success: true,
@@ -499,10 +499,10 @@ Deno.serve(async (req) => {
             }
           });
         } else {
-          console.error('funlet-sms-handler-v2 failed:', handlerResponse.status, await handlerResponse.text());
+          console.error('funlet-sms-handler-beta failed:', handlerResponse.status, await handlerResponse.text());
         }
       } catch (error) {
-        console.error('Failed to forward to funlet-sms-handler-v2:', error);
+        console.error('Failed to forward to funlet-sms-handler-beta:', error);
       }
       
       // If forwarding fails, return a helpful message
@@ -517,8 +517,8 @@ Deno.serve(async (req) => {
         }
       });
     } else {
-      // Not an RSVP command (1, 2, 3) and not "9" - forward to funlet-sms-handler
-      console.log('Message is not a valid command, forwarding to funlet-sms-handler');
+      // Not an RSVP command (1, 2, 3) and not "9" - forward to funlet-sms-handler-beta
+      console.log('Message is not a valid command, forwarding to funlet-sms-handler-beta');
 
       // Determine if user is a host or crew member for proper AI processing
       let isHost = false;
@@ -543,7 +543,7 @@ Deno.serve(async (req) => {
       }
 
       try {
-        const handlerResponse = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/funlet-sms-handler-v2`, {
+        const handlerResponse = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/funlet-sms-handler-beta`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -558,7 +558,7 @@ Deno.serve(async (req) => {
 
         if (handlerResponse.ok) {
           const handlerData = await handlerResponse.json();
-          console.log('funlet-sms-handler response:', handlerData);
+          console.log('funlet-sms-handler-beta response:', handlerData);
           
           return new Response(JSON.stringify({
             success: true,
@@ -571,10 +571,10 @@ Deno.serve(async (req) => {
             }
           });
         } else {
-          console.error('funlet-sms-handler failed:', handlerResponse.status, await handlerResponse.text());
+          console.error('funlet-sms-handler-beta failed:', handlerResponse.status, await handlerResponse.text());
         }
       } catch (error) {
-        console.error('Failed to forward to funlet-sms-handler:', error);
+        console.error('Failed to forward to funlet-sms-handler-beta:', error);
       }
       
       // If forwarding fails, return a helpful message
@@ -604,3 +604,4 @@ Deno.serve(async (req) => {
     });
   }
 });
+
